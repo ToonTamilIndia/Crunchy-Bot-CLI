@@ -100,7 +100,7 @@ python3 cli.py
    - Decrypts with `mp4decrypt`
    - Merges all streams using **FFmpeg**
    - Optional **Watermarking**
-   - Saves a final `.mp4` file
+   - Saves a final `.mkv` file
 
 ---
 
