@@ -6,7 +6,7 @@ Crunchy Bot/CLI allows users to download videos from the Crunchyroll platform vi
 
 * Download Crunchyroll videos via CLI or Telegram Bot
 * Customizable output title format
-* Subtitle selection (hardsubs or softsubs, depending on availability)
+* Subtitle selection (multiple languages, depending on availability)
 * Audio track selection
 * Batch downloading capabilities
 * Metadata tagging for downloaded files
