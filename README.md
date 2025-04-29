@@ -1,4 +1,4 @@
-```markdown
+
 # 🚀 **Crunchy-Bot/CLI** 🎬
 
 **Crunchy-Bot/CLI** is your ultimate tool to download **Crunchyroll** videos seamlessly. Whether you prefer the **command-line interface (CLI)** or want a more interactive experience through a **Telegram bot**, this tool has you covered! It supports everything from decryption, merging, metadata tagging, multiple audio/subtitle selections, batch downloads, and even optional watermarking. All this wrapped up in a sleek and easy-to-use interface.
@@ -164,14 +164,7 @@ Run in a containerized environment:
 
 ```bash
 docker build -t crunchy-bot-cli .
-docker run -it crunchy-bot-cli       # For CLI
-docker run -d --name crunchy-tg-bot  # For Telegram Bot
-```
-
-You can customize the `Dockerfile` to specify the bot mode:
-
-```Dockerfile
-CMD ["python3", "cli.py"]  # or tg.py
+docker run -d --name crunchy-bot-cli 
 ```
 
 ---
@@ -227,5 +220,5 @@ You are responsible for following copyright laws and platform terms.
 
 ---
 
-© **ToonTamilIndia** & **ToonEncodesIndia** 2025 - 26
+© **ToonTamilIndia** & **ToonEncodesIndia** 2025 - 2026
 ```
