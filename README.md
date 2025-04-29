@@ -36,7 +36,7 @@ Follow these steps to set up the project:
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/ToonTamilIndia/Crunchy-Bot-CLI.git](https://github.com/ToonTamilIndia/Crunchy-Bot-CLI.git)
+    git clone https://github.com/ToonTamilIndia/Crunchy-Bot-CLI.git
     cd Crunchy-Bot-CLI
     ```
 
