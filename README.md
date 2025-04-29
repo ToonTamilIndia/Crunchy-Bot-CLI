@@ -1,156 +1,220 @@
+```markdown
 # Crunchy-Bot/CLI
 
-Crunchy Bot/CLI allows users to download videos from the Crunchyroll platform via a command-line interface (CLI) or a Telegram bot.
+**Crunchy-Bot/CLI** is a comprehensive tool to download Crunchyroll videos either through a **command-line interface (CLI)** or an interactive **Telegram bot**. It supports decryption, merging, metadata tagging, multiple audio/subtitle selection, batch downloads, and optional watermarking.
+
+---
 
 ## Features
 
-* Download Crunchyroll videos via CLI or Telegram Bot
-* Customizable output title format
-* Subtitle selection (multiple languages, depending on availability)
-* Audio track selection
-* Batch downloading capabilities
-* Metadata tagging for downloaded files
-* Optional watermarking (if configured)
+- Download Crunchyroll episodes or full series
+- CLI and Telegram bot interface
+- DRM decryption using Widevine L3 and `mp4decrypt`
+- Video quality selection (360p–1080p or original)
+- Multiple audio track selection
+- Subtitle and caption download (VTT to SRT conversion)
+- Merges video/audio/subtitles using FFmpeg
+- Custom file naming, output format, and optional watermark
+- Upload final merged file directly to Telegram
+- Role-based access and quality limits (Regular, Premium, Sudo)
+
+---
 
 ## Prerequisites
 
-Before you can use Crunchy-Bot/CLI, you need the following:
+1. **`l3.wvd` File**
+   - Widevine CDM is required to decrypt protected content.
+   - Not included in the repo — you must provide your own.
+   - Place in project root (alongside `cli.py`, `tg.py`).
 
-1.  **`l3.wvd` File:**
-    * This project requires a Widevine L3 CDM file (`l3.wvd`) for decrypting Crunchyroll streams.
-    * **IMPORTANT:** This file is **NOT** provided in this repository due to legal restrictions. You must acquire this file yourself.
-    * Place the `l3.wvd` file in the root directory of this project (the same folder where `cli.py` and `tg.py` are located).
+2. **`mp4decrypt` Binary**
+   - Used to decrypt video/audio segments.
+   - Place in root folder or ensure it’s in `PATH`.
+   - Linux/macOS:
+     ```bash
+     chmod +x mp4decrypt
+     ```
 
-2.  **`mp4decrypt` Binary:**
-    * A `mp4decrypt` binary is necessary for decrypting the downloaded video segments.
-    * Ensure you have the correct binary compatible with your operating system and architecture (e.g., Linux x86_64, Linux ARM, Windows x64). You may need to compile it or find a pre-built version.
-    * Place the `mp4decrypt` binary in the project's root directory or ensure it is accessible via your system's PATH environment variable.
-    * **Make the binary executable** (on Linux/macOS):
-        ```bash
-        chmod +x mp4decrypt
-        ```
+---
 
 ## Installation
 
-Follow these steps to set up the project:
+```bash
+git clone https://github.com/ToonTamilIndia/Crunchy-Bot-CLI.git
+cd Crunchy-Bot-CLI
+```
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/ToonTamilIndia/Crunchy-Bot-CLI.git
-    cd Crunchy-Bot-CLI
-    ```
+### (Optional) Create Virtual Environment
 
-2.  **Install dependencies:**
-    It's highly recommended to use a Python virtual environment.
-    ```bash
-    # Create a virtual environment (optional but recommended)
-    python3 -m venv venv
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
 
-    # Activate the virtual environment
-    # On Linux/macOS:
-    source venv/bin/activate
+### Install Dependencies
 
-    # Install required packages
-    pip install -r requirements.txt
-    ```
+```bash
+pip install -r requirements.txt
+```
+
+---
 
 ## Configuration
 
-* Both the CLI and the Telegram Bot functionalities can be customized through the `config.py` file.
-* Open `config.py` in a text editor and adjust settings such as download paths, filename templates, Telegram Bot Token, allowed user IDs, and other preferences according to your needs.
+Edit `config.py` to set:
+- Crunchyroll credentials (optional): `Email`, `Password`
+- Telegram Bot credentials: `BOT_TOKEN`, `API_ID`, `API_HASH`
+- Watermark settings, file naming, debug options, etc.
+- Access control: `sudo_users`, `premium_users`, etc.
 
-## Usage
+---
 
-Make sure you have completed the **Prerequisites**, **Installation**, and **Configuration** steps before running the bot.
+## CLI Usage Guide
 
-1.  **Command-Line Interface (CLI):**
-    * Navigate to the project directory in your terminal.
-    * Activate the virtual environment if you created one (`source venv/bin/activate`).
-    * Run the CLI script:
-        ```bash
-        python3 cli.py
-        ```
-    * The script will guide you through logging into Crunchyroll and selecting videos or series to download.
+### Run CLI
+```bash
+source venv/bin/activate
+python3 cli.py
+```
 
-2.  **Telegram Bot:**
-    * Ensure you have entered your Telegram Bot Token and configured other relevant settings in `config.py`.
-    * Navigate to the project directory in your terminal.
-    * Activate the virtual environment if you created one (`source venv/bin/activate`).
-    * Run the Telegram bot script:
-        ```bash
-        python3 tg.py
-        ```
-    * Interact with your bot on Telegram using the commands it supports.
+### Workflow
 
-## Deployment
+#### **1. Enter Crunchyroll URL**
+- Example:
+  - Single Episode: `https://www.crunchyroll.com/watch/GXXXXXX`
+  - Series: `https://www.crunchyroll.com/series/GXXXXXX`
 
-You can deploy Crunchy-Bot/CLI in several ways:
+#### **2. Select Options**
+- **Video Quality:** Choose from available resolutions (360p, 480p, 720p, 1080p)
+- **Audio Tracks:** Select one or multiple languages
+- **Subtitles/Captions:** Choose from available subtitle tracks
+
+#### **3. Download Process**
+- Downloads video and audio segments
+- Downloads and converts subtitles (VTT to SRT if needed)
+- Decrypts content with `mp4decrypt`
+- Merges all streams using FFmpeg
+- Applies watermark (optional)
+- Saves a final `.mp4` file in the current directory or organized folders
+
+---
+
+## Telegram Bot Usage Guide
+
+### Run Bot
+```bash
+source venv/bin/activate
+python3 tg.py
+```
+
+### How It Works
+
+#### **1. Start the Bot**
+- On Telegram, send `/start` to get a welcome message.
+
+#### **2. Send a Crunchyroll Link**
+```bash
+/download https://www.crunchyroll.com/watch/GXXXXXX
+```
+
+#### **3. Interactive Workflow**
+The bot will:
+- Prompt you to select:
+  - Video quality
+  - Audio tracks (via buttons)
+  - Subtitle/caption languages
+- Summarize your choices
+- Begin download, decryption, merging
+- Upload final video directly to your Telegram chat
+
+### User Roles
+- **Regular Users**: Max 2 audio tracks, up to 480p
+- **Premium Users**: No limits
+- **Sudo Users**: Admins with full access and commands
+
+### Bot Commands
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Show welcome message |
+| `/help` | Show command list |
+| `/download <url>` | Start download process |
+| `/cancel` | Cancel current session |
+
+### Admin (Sudo) Commands
+
+| Command | Description |
+|---------|-------------|
+| `/addpremium <user_id>` | Add premium access |
+| `/rempremium <user_id>` | Remove premium access |
+| `/listpremium` | Show premium users |
+| `/addsudo <user_id>` | Add another sudo user |
+| `/remsudo <user_id>` | Remove sudo access |
+| `/listsudo` | Show all sudo users |
+
+---
+
+## Deployment Options
 
 ### Docker
 
-1.  **Build the Docker image:**
-    ```bash
-    docker build -t crunchy-bot-cli .
-    ```
+```bash
+docker build -t crunchy-bot-cli .
+docker run -it crunchy-bot-cli       # For CLI
+docker run -d --name crunchy-tg-bot  # For Telegram bot
+```
 
-2.  **Run the container:**
-    * For the CLI (interactive):
-        ```bash
-        docker run crunchy-bot-cli
-        ```
-    * For the Telegram Bot (detached):
-        ```bash
-        docker run -d --name crunchy-tg-bot
-        ```
-    * **Adjust the Dockerfile to specify the entry point**  
-  Set the command to run the desired application script (`cli.py` or `tg.py`). By default, `tg.py` is used:
+Edit Dockerfile if needed:
+```Dockerfile
+CMD ["python3", "cli.py"]  # or tg.py
+```
 
-  ```Dockerfile
-  # For CLI mode:
-  CMD ["python3", "cli.py"]
+---
 
-  # For Telegram Bot mode (default):
-  CMD ["python3", "tg.py"]
-  ```
+### VPS Hosting (Systemd)
 
-### VPS / Self-Hosting
+```bash
+tmux new -s crunchybot
+source venv/bin/activate
+python3 tg.py
+```
 
-1.  Connect to your VPS or server via SSH.
-2.  Ensure Python 3 and `pip` are installed.
-3.  Follow the **Installation** steps (clone repo, install dependencies, preferably in a virtual environment).
-4.  Place your `l3.wvd` file and the executable `mp4decrypt` binary in the project directory.
-5.  Configure `config.py` as needed.
-6.  **Running Persistently (especially for the Telegram bot):**
-    * **Using `tmux` or `screen`:**
-        * Start a new session: `tmux new -s crunchybot`
-        * Activate virtual environment: `source venv/bin/activate`
-        * Run the script: `python3 tg.py`
-        * Detach from the session: Press `Ctrl+b` then `d`. The script will keep running.
-        * Reattach later: `tmux attach -t crunchybot`
-    * **Using `systemd` (Linux):**
-        * Create a service file (e.g., `/etc/systemd/system/crunchybot.service`).
-            ```ini
-            [Unit]
-            Description=Crunchyroll Telegram Bot Service
-            After=network.target
+Or create a systemd service at `/etc/systemd/system/crunchybot.service`:
 
-            [Service]
-            User=your_username # Replace with the user the bot should run as
-            Group=your_group   # Replace with the user's group
-            WorkingDirectory=/path/to/Crunchy-Bot-CLI # Replace with the actual path
-            ExecStart=/path/to/Crunchy-Bot-CLI/venv/bin/python3 /path/to/Crunchy-Bot-CLI/tg.py # Adjust path to python if not using venv
-            Restart=always # Or 'on-failure'
-            StandardOutput=file:/var/log/crunchybot.log # Optional: Log output
-            StandardError=file:/var/log/crunchybot.err.log # Optional: Log errors
+```ini
+[Unit]
+Description=Crunchyroll Telegram Bot
+After=network.target
 
-            [Install]
-            WantedBy=multi-user.target
-            ```
-        * Reload systemd: `sudo systemctl daemon-reload`
-        * Enable the service (to start on boot): `sudo systemctl enable crunchybot.service`
-        * Start the service: `sudo systemctl start crunchybot.service`
-        * Check status: `sudo systemctl status crunchybot.service`
+[Service]
+User=your_user
+WorkingDirectory=/path/to/Crunchy-Bot-CLI
+ExecStart=/path/to/venv/bin/python3 /path/to/tg.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable crunchybot
+sudo systemctl start crunchybot
+```
+
+---
 
 ## Credits
 
-* This project takes inspiration and possibly uses adapted code from [Yoimi by NyaShinn1204](https://github.com/NyaShinn1204/Yoimi). Many thanks to the original author.
+This project is inspired by and adapts components from:
+- [Yoimi by NyaShinn1204](https://github.com/NyaShinn1204/Yoimi)
+
+---
+
+## Disclaimer
+
+This project is intended for **educational purposes only**.  
+You are responsible for following copyright laws and platform terms.
+```
+
+---
