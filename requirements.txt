@@ -1,0 +1,8 @@
+tls-client
+lxml
+tqdm
+hachoir
+pyrogram
+tgcrypto
+pywidevine
+typing_extensions
