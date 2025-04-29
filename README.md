@@ -169,41 +169,43 @@ docker run -d --name crunchy-bot-cli
 
 ---
 
-### VPS Hosting with Systemd
+### VPS / Self-Hosting
 
-To run the bot on a VPS with **Systemd**:
+1.  Connect to your VPS or server via SSH.
+2.  Ensure Python 3 and `pip` are installed.
+3.  Follow the **Installation** steps (clone repo, install dependencies, preferably in a virtual environment).
+4.  Place your `l3.wvd` file and the executable `mp4decrypt` binary in the project directory.
+5.  Configure `config.py` as needed.
+6.  **Running Persistently (especially for the Telegram bot):**
+    * **Using `tmux` or `screen`:**
+        * Start a new session: `tmux new -s crunchybot`
+        * Activate virtual environment: `source venv/bin/activate`
+        * Run the script: `python3 tg.py`
+        * Detach from the session: Press `Ctrl+b` then `d`. The script will keep running.
+        * Reattach later: `tmux attach -t crunchybot`
+    * **Using `systemd` (Linux):**
+        * Create a service file (e.g., `/etc/systemd/system/crunchybot.service`).
+            ```ini
+            [Unit]
+            Description=Crunchyroll Telegram Bot Service
+            After=network.target
 
-```bash
-tmux new -s crunchybot
-source venv/bin/activate
-python3 tg.py
-```
+            [Service]
+            User=your_username # Replace with the user the bot should run as
+            Group=your_group   # Replace with the user's group
+            WorkingDirectory=/path/to/Crunchy-Bot-CLI # Replace with the actual path
+            ExecStart=/path/to/Crunchy-Bot-CLI/venv/bin/python3 /path/to/Crunchy-Bot-CLI/tg.py # Adjust path to python if not using venv
+            Restart=always # Or 'on-failure'
+            StandardOutput=file:/var/log/crunchybot.log # Optional: Log output
+            StandardError=file:/var/log/crunchybot.err.log # Optional: Log errors
 
-For **automatic startup**, create a `systemd` service at `/etc/systemd/system/crunchybot.service`:
-
-```ini
-[Unit]
-Description=Crunchyroll Telegram Bot
-After=network.target
-
-[Service]
-User=your_user
-WorkingDirectory=/path/to/Crunchy-Bot-CLI
-ExecStart=/path/to/venv/bin/python3 /path/to/tg.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then enable and start the service:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable crunchybot
-sudo systemctl start crunchybot
-```
-
+            [Install]
+            WantedBy=multi-user.target
+            ```
+        * Reload systemd: `sudo systemctl daemon-reload`
+        * Enable the service (to start on boot): `sudo systemctl enable crunchybot.service`
+        * Start the service: `sudo systemctl start crunchybot.service`
+        * Check status: `sudo systemctl status crunchybot.service`
 ---
 
 ## 💡 **Credits**
