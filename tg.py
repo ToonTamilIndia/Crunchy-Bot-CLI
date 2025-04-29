@@ -1221,8 +1221,6 @@ def download_decrypt_merge_single(
         map_commands = []
         metadata_commands = []
         Watermark_Name = globals().get("Watermark_Name", "")
-        if not use_watermark:
-            Watermark_Name = ""
         if use_watermark:
             filter_complex = get_filter_complex()
             ffmpeg_cmd_list.extend(["-filter_complex", filter_complex])
@@ -1237,12 +1235,17 @@ def download_decrypt_merge_single(
             lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(audio['title_lang'], audio['title_lang']) if audio['title_lang'] else "und" 
             title_lang = audio['title_lang']
             output_audio_langs.append(title_lang)
-            metadata_commands.extend([
-                f"-metadata:s:a:{i}", f"language={lang_code}",
-                f"-metadata:s:a:{i}", f'title={Watermark_Name} - [{title_lang}]'
-            ])
-
-       
+            if use_watermark:
+                 metadata_commands.extend([
+                 f"-metadata:s:a:{i}", f"language={lang_code}",
+                 f"-metadata:s:a:{i}", f'title={Watermark_Name} - [{title_lang}]'
+                  ])
+            else:
+                 metadata_commands.extend([
+                 f"-metadata:s:a:{i}", f"language={lang_code}",
+                 f"-metadata:s:a:{i}", f'title=[{title_lang}]'
+                  ])
+                
         output_sub_langs = []
         for i, sub in enumerate(subtitle_files):
             stream_index = len(audio_files) + i + 1 
@@ -1250,11 +1253,17 @@ def download_decrypt_merge_single(
             lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(sub['title_lang'], sub['title_lang']) if sub['title_lang'] else "und" 
             title_lang = sub['title_lang']
             sub_type = sub['type']
-            output_sub_langs.append(f"{title_lang} ({os.path.splitext(sub['path'])[1][1:]})") 
-            metadata_commands.extend([
-                 f"-metadata:s:s:{i}", f"language={lang_code}",
-                 f"-metadata:s:s:{i}", f'title={Watermark_Name} - [{title_lang}] [{sub_type}]'
-            ])
+            output_sub_langs.append(f"{title_lang} ({os.path.splitext(sub['path'])[1][1:]})")
+            if use_watermark:
+                  metadata_commands.extend([
+                     f"-metadata:s:s:{i}", f"language={lang_code}",
+                     f"-metadata:s:s:{i}", f'title={Watermark_Name} - [{title_lang}] [{sub_type}]'
+                  ])
+            else:
+                metadata_commands.extend([
+                     f"-metadata:s:s:{i}", f"language={lang_code}",
+                     f"-metadata:s:s:{i}", f'title=[{title_lang}] [{sub_type}]'
+                  ])
 
         quality_str = f"{video_quality_info['height']}p"
         audio_str = "+".join(output_audio_langs) if output_audio_langs else "NoAudio"
