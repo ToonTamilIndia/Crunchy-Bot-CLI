@@ -216,5 +216,4 @@ This project is inspired by and adapts components from:
 This project is intended for **educational purposes only**.  
 You are responsible for following copyright laws and platform terms.
 ```
-
----
+© ToonTamilIndia & ToonEncodesIndia 2025 - 26
