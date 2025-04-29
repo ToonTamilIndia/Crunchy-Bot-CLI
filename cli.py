@@ -232,7 +232,11 @@ if "watch" in video_url:
     output_file = f"{Title}.{video['height']}p.["
     for i, audio in enumerate(selected_audios, start=1):
         lang = audio['audio_locale']
-        ffmpeg_command += f' -metadata:s:a:{i-1} language={lang[:3].lower()} -metadata:s:a:{i-1} title="{Watermark_Name} - [{lang}]"'
+        lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang,lang)
+        if use_watermark:
+           ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="{Watermark_Name} - [{lang}]"'
+        else:
+           ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="[{lang}]"'
         if i == 1:
            output_file += f"{lang}"
         else:
@@ -242,9 +246,11 @@ if "watch" in video_url:
         output_file += f" ({audio_codec}) ] [" if use_watermark else f" ["
         for i, subtitle in enumerate(selected_subtitles, start=0):
             lang = subtitle['language']
-            short_lang = lang[:3].lower()   
-
-            ffmpeg_command += f' -metadata:s:s:{i} language={short_lang} -metadata:s:s:{i} title="{Watermark_Name} - [{lang}] [{subtitle["type"]}]"'
+            lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang,lang)
+            if use_watermark:
+               ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="{Watermark_Name} - [{lang}] [{subtitle["type"]}]"'
+            else
+                ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="[{lang}] [{subtitle["type"]}]"'
             if i == 0:
                output_file += f"{lang} ({subtitle['format']})"
             else:
@@ -512,7 +518,10 @@ else:
         for i, audio in enumerate(selected_audios, start=1):
             lang = audio['audio_locale']
             lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang, lang) if lang else "und" 
-            ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="{Watermark_Name} - [{lang}]"'
+            if use_watermark:
+               ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="{Watermark_Name} - [{lang}]"'
+            else:
+               ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="[{lang}]"'
             if i == 1:
                output_file += f"{lang}"
             else:
@@ -523,8 +532,10 @@ else:
             for i, subtitle in enumerate(selected_subtitles, start=0):
                 lang = subtitle['language']
                 lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang, lang) if lang else "und"      
-
-                ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="{Watermark_Name} - [{lang}] [{subtitle["type"]}]"'
+                if use_watermark:
+                   ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="{Watermark_Name} - [{lang}] [{subtitle["type"]}]"'
+                else
+                    ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="[{lang}] [{subtitle["type"]}]"'
                 if i == 0:
                    output_file += f"{lang} ({subtitle['format']})"
                 else:
