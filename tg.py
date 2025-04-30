@@ -684,8 +684,8 @@ def confirm_download(client, user_id):
 
     summary += f"**Quality:** {sel_quality['height']}p\n"
     summary += f"**Audio:** {', '.join([a['audio_locale'] for a in sel_audios]) if sel_audios else 'None'}\n"
-    summary += f"**Subtitles:** {', '.join([f'{s['language']} ({s['format']})' for s in sel_subs]) if sel_subs else 'None'}\n"
-
+    subs_text = ', '.join([f"{s['language']} ({s['format']})" for s in sel_subs]) if sel_subs else 'None'
+    summary += f"Subtitles: {subs_text}\n"
     buttons = [
         [InlineKeyboardButton("Start Download", callback_data="confirm_start")],
         [InlineKeyboardButton("Cancel", callback_data="cancel")]
@@ -1195,7 +1195,7 @@ def download_decrypt_merge_single(
             enc_audio_path = f"Downloads/enc_{title}_{locale}.m4a"
             dec_audio_path = f"{base_filename}_{locale}.m4a"
             temp_files.append(enc_audio_path)
-            decrypt_cmd = f"./mp4decrypt {shlex.quote(f"{enc_audio_path}")} {shlex.quote(dec_audio_path)} --show-progress --key {audio['key']}"
+            decrypt_cmd = f"./mp4decrypt {shlex.quote(enc_audio_path)} {shlex.quote(dec_audio_path)} --show-progress --key {audio['key']}"
             _, stderr, retcode = run_shell_command(decrypt_cmd)
             if retcode != 0:
                 print(f"Warning: Audio decryption failed for {locale}: {stderr}. Skipping audio track.")
