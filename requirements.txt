@@ -2,6 +2,7 @@ tls-client
 lxml
 tqdm
 hachoir
-pyrofork
+pyrogram
+tgcrypto
 pywidevine
 typing_extensions
