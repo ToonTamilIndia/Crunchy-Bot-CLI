@@ -357,7 +357,7 @@ def list_sudo(client, message: Message):
 @check_active_download 
 def download_command(client, message: Message):
     user_id = message.from_user.id
-    
+    global crunchyroll, license_handler, vid_token
     if use_account:
         if not Email or not Password:
             print("ERROR: Email and Password required in config.py for account login.")
