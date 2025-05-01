@@ -39,31 +39,9 @@ try:
        audio_codec = "copy"
        use_watermark = False
     
-    if use_account:
-        if not Email or not Password:
-            print("ERROR: Email and Password required in config.py for account login.")
-            vid_token = auth.get_guest_token()
-            if not vid_token:
-                raise Exception("Failed to get guest token.")
-            print("WARNING: Using guest token due to missing credentials.")
-        else:
-            vid_token = auth.get_user_token(Email, Password)
-            if not vid_token:
-                print("WARNING: Invalid email or password, falling back to guest token.")
-                vid_token = auth.get_guest_token()
-                if not vid_token:
-                    raise Exception("Failed to get guest token after login failure.")
-    else:
-        vid_token = auth.get_guest_token()
-        if not vid_token:
-            raise Exception("Failed to get guest token.")
-
-    crunchyroll = Crunchyroll(vid_token)
-    license_handler = CrunchyrollLicense()
-    print("Crunchyroll Authentication successful.")
 
 except Exception as e:
-    print(f"FATAL: Crunchyroll authentication failed: {e}")
+    print(f"ERROR : {e}")
     exit(1)
 
 
@@ -379,7 +357,30 @@ def list_sudo(client, message: Message):
 @check_active_download 
 def download_command(client, message: Message):
     user_id = message.from_user.id
+    
+    if use_account:
+        if not Email or not Password:
+            print("ERROR: Email and Password required in config.py for account login.")
+            vid_token = auth.get_guest_token()
+            if not vid_token:
+                print("Failed to get guest token.")
+            print("WARNING: Using guest token due to missing credentials.")
+        
+        else:
+            vid_token = auth.get_user_token(Email, Password)
+            if not vid_token:
+                print("WARNING: Invalid email or password, falling back to guest token.")
+                vid_token = auth.get_guest_token()
+                if not vid_token:
+                    print("Failed to get guest token after login failure.")
+    else:
+        vid_token = auth.get_guest_token()
+        if not vid_token:
+            raise Exception("Failed to get guest token.")
 
+    crunchyroll = Crunchyroll(vid_token)
+    license_handler = CrunchyrollLicense()
+    print("Crunchyroll Authentication successful.")
     if len(message.command) < 2:
         message.reply_text(
               "Please provide a Crunchyroll URL.\nExample: `/download <url>` or `/dl <url>`",
