@@ -54,7 +54,7 @@ if "watch" in video_url:
     for index, version in enumerate(video_info['versions']):
         print(f"{index + 1}) {locale_map.get(version['audio_locale'],version['audio_locale'])}")    
 
-    print("Note: \n1) The audio qualaity is automatically set to high quality.\n2) To select multiple audios, enter the numbers separated by commas (e.g., 1, 2, 3).")
+    print("Note: \n1) The audio quality is automatically set to high quality.\n2) To select multiple audios, enter the numbers separated by commas (e.g., 1, 2, 3).")
     audio_list_input = input("Enter the desired audio(s): ")
     audio_list = [int(choice.strip()) - 1 for choice in audio_list_input.split(',')]
     if any(choice < 0 or choice >= len(video_info['versions']) for choice in audio_list):
@@ -155,7 +155,7 @@ if "watch" in video_url:
     anime = re.sub(r"\s*\([^)]*\)", "", crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_title"])
     Title = anime + "." + "S" + str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"]).zfill(2) + "E" +  str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"]).zfill(2) + "-" + crunchyroll.get_single_info(id)["data"][0]["title"]
     if use_custom_title:
-        Title = custom_title.formet(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
+        Title = custom_title.format(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
     Title = re.sub(r'[<>:\"\'/\\|?*]', '', Title)   
 
     print("Downloading video file...")  
@@ -249,7 +249,7 @@ if "watch" in video_url:
             lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang,lang)
             if use_watermark:
                ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="{Watermark_Name} - [{lang}] [{subtitle["type"]}]"'
-            else
+            else:
                 ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="[{lang}] [{subtitle["type"]}]"'
             if i == 0:
                output_file += f"{lang} ({subtitle['format']})"
@@ -265,13 +265,13 @@ if "watch" in video_url:
     print("ffmpeg command:", ffmpeg_command)
     os.system(ffmpeg_command)
     print("Video and audio files merged successfully")
-    print("Deleting temp sorary files...")
-    print("temp sorary files deleted successfully")
+    print("Deleting temporary files...")
+    print("Temporary files deleted successfully")
     os.system(f"rm -rf '{Title}.mp4'")
     for audio in selected_audios:
         audio_file = f"{Title}_{audio['audio_locale']}.m4a"
         os.system(f"rm -rf '{audio_file}'")
-        os.system(f"rm - rf 'enc_{audio_file}'")
+        os.system(f"rm -rf 'enc_{audio_file}'")
     if selected_subtitles:
         for subtitle in selected_subtitles:
             subtitle_file = f"{Title}_{subtitle['language']}.{subtitle['format']}"
@@ -327,7 +327,7 @@ else:
             for index, version in enumerate(video_info['versions']):
                 print(f"{index + 1}) {locale_map.get(version['audio_locale'],version['audio_locale'])}")        
 
-            print("Note: \n1) The audio qualaity is automatically set to high quality.\n2) To select multiple audios, enter the numbers separated by commas (e.g., 1, 2, 3).")
+            print("Note: \n1) The audio quality is automatically set to high quality.\n2) To select multiple audios, enter the numbers separated by commas (e.g., 1, 2, 3).")
             audio_list_input = input("Enter the desired audio(s): ")
             audio_list = [int(audio_choice.strip()) - 1 for audio_choice in audio_list_input.split(',')]
             if any(audio_choice < 0 or audio_choice >= len(video_info['versions']) for audio_choice in audio_list):
@@ -438,7 +438,7 @@ else:
         anime = re.sub(r"\s*\([^)]*\)", "", crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_title"])
         Title = anime + "." + "S" + str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"]).zfill(2) + "E" +  str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"]).zfill(2) + "-" + crunchyroll.get_single_info(id)["data"][0]["title"]
         if use_custom_title:
-            Title = custom_title.formet(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
+            Title = custom_title.format(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
         Title = re.sub(r'[<>:\"\'/\\|?*]', '', Title)       
 
         print("Downloading video file...")      
@@ -534,7 +534,7 @@ else:
                 lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang, lang) if lang else "und"      
                 if use_watermark:
                    ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="{Watermark_Name} - [{lang}] [{subtitle["type"]}]"'
-                else
+                else:
                     ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="[{lang}] [{subtitle["type"]}]"'
                 if i == 0:
                    output_file += f"{lang} ({subtitle['format']})"
@@ -550,8 +550,8 @@ else:
         print("ffmpeg command:", ffmpeg_command)
         os.system(ffmpeg_command)
         print("Video and audio files merged successfully")
-        print("Deleting temp sorary files...")
-        print("temp sorary files deleted successfully")
+        print("Deleting temporary files...")
+        print("Temporary files deleted successfully")
         os.system(f"rm -rf '{Title}.mp4'")
         for audio in selected_audios:
             audio_file = f"{Title}_{audio['audio_locale']}.m4a"
