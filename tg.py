@@ -449,7 +449,7 @@ def download_command(client, message: Message):
                 edit_message(status_msg, "Invalid series URL format.")
                 del user_states[user_id]
                 return
-            # series_id extracted from match but passed via video_url to get_content_info
+            # URL validated; get_content_info extracts series_id internally from the URL
 
             edit_message(status_msg, "Fetching series information...")
             series_data, _ = crunchyroll.get_content_info(url=video_url)
