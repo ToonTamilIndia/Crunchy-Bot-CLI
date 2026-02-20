@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+
+# IDE settings
+.idea/
+.vscode/
+*.swp
+
+# Downloads and temp files
+Downloads/
+Temp/
+
+# Session files
+*.session
+*.session-journal
+
+# Log files
+*.log
+error.txt
+
+# WVD license file
+*.wvd
