@@ -13,7 +13,9 @@ import subprocess
 from crunchyroll import (
     Crunchyroll, CrunchyrollAuth, CrunchyrollLicense,
     parse_mpd_content, get_segment_link_list, download_segment,
-    get_filter_complex, convert_vtt_to_srt_custom
+    get_filter_complex, convert_vtt_to_srt_custom,
+    get_episode_display_number, get_episode_title,
+    parse_episode_selection
 )
 from config import *
 
@@ -51,32 +53,48 @@ class tgUploader:
         self.msg = msg
 
     def upload_file(self, file_path):
+        thumb = None
         try:
             file_name = os.path.basename(file_path)
             duration = get_duration(file_path)
             thumb = get_thumbnail(file_path, "", duration / 2)
             caption = '''<code>{}</code>'''.format(file_name)
             progress_args_text = "<code>[+]</code> <b>{}</b>\n<code>{}</code>".format("Uploading", file_name)
-            self.app.send_video(
-                video=file_path,
-                chat_id=self.msg.chat.id,
-                caption=caption,
-                progress=progress_for_pyrogram,
-                progress_args=(
+            send_kwargs = {
+                "video": file_path,
+                "chat_id": self.msg.chat.id,
+                "caption": caption,
+                "progress": progress_for_pyrogram,
+                "progress_args": (
                     progress_args_text,
                     self.msg,
                     time.time()
-                ), thumb=thumb, duration=duration, width=1280, height=720
-            )
-            os.remove(thumb)
+                ),
+                "duration": duration,
+                "width": 1280,
+                "height": 720
+            }
+            if thumb:
+                send_kwargs["thumb"] = thumb
+            self.app.send_video(**send_kwargs)
         except Exception as e:
             print(e)
             self.msg.edit(f"`{e}`")
+        finally:
+            if thumb:
+                with suppress(Exception):
+                    os.remove(thumb)
 
 def get_duration(filepath):
-    metadata = extractMetadata(createParser(filepath))
-    if metadata and metadata.has("duration"):
-        return metadata.get('duration').seconds
+    try:
+        parser = createParser(filepath)
+        if not parser:
+            return 0
+        metadata = extractMetadata(parser)
+        if metadata and metadata.has("duration"):
+            return metadata.get('duration').seconds
+    except Exception as e:
+        print(f"Error reading duration: {e}")
     return 0
 
 def get_thumbnail(in_filename, path, ttl):
@@ -114,12 +132,14 @@ def progress_for_pyrogram(
     start
 ):
     now = time.time()
-    diff = now - start
+    diff = max(now - start, 0.001)
+    if total <= 0:
+        return
 
     if round(diff % 10.00) == 0 or current == total:
         percentage = current * 100 / total
         speed = current / diff
-        time_to_completion = get_readable_time(round((total - current) / speed))
+        time_to_completion = get_readable_time(round((total - current) / speed)) if speed else "0s"
 
         progress = "[{0}{1}]".format(
             ''.join(["█" for _ in range(math.floor(percentage / 5))]),
@@ -200,6 +220,8 @@ def check_active_download(func):
     @wraps(func)
     def wrapper(client, update):
         user_id = update.from_user.id
+        if isinstance(update, CallbackQuery) and update.data == "cancel":
+            return func(client, update)
         if user_id in sudo_users:
             return func(client, update)
         if active_downloads.get(user_id):
@@ -234,12 +256,39 @@ def get_user_limits(user_id):
         return REGULAR_USER_AUDIO_LIMIT, REGULAR_USER_VIDEO_LIMIT_P
 
 
+def get_download_access_filter():
+    if AUTHORIZED_USERS:
+        access_filter = filters.chat(AUTHORIZED_USERS)
+    else:
+        access_filter = filters.private
+    if sudo_users:
+        access_filter = access_filter | filters.user(sudo_users)
+    return access_filter
+
+
+DOWNLOAD_ACCESS_FILTER = get_download_access_filter()
+
+
+def get_decryption_key(license_response):
+    if not license_response or "key" not in license_response:
+        return None
+    keys = license_response.get("key") or []
+    for key in keys:
+        if str(key.get("type", "")).upper() == "CONTENT":
+            return "{}:{}".format(key["kid_hex"], key["key_hex"])
+    for key in keys:
+        if key.get("kid_hex") and key.get("key_hex"):
+            return "{}:{}".format(key["kid_hex"], key["key_hex"])
+    return None
+
+
 @app.on_message(filters.command("start"))
 def start_command(client, message: Message):
     message.reply_text(
         "Hello! Welcome to the Crunchyroll Downloader Bot.\n"
-        "Send me a Crunchyroll video or series URL using /download.\n"
+        "Send me a Crunchyroll video URL, series URL, or search title using /download.\n"
         "Example: `/download https://www.crunchyroll.com/watch/GXXXXXXX/episode-title`\n"
+        "Search Example: `/download naruto`\n"
         "Use /help for more commands."
     )
 
@@ -253,6 +302,7 @@ def help_command(client, message: Message):
 **/download <url> or /dl <url>**: Starts the download process for a Crunchyroll video or series URL.
     - Example (Episode): `/download https://www.crunchyroll.com/watch/GXXXXXXX/episode-title`
     - Example (Series): `/download https://www.crunchyroll.com/series/GXXXXXXX/series-title`
+    - Example (Search): `/download naruto`
 **/cancel**: Cancels the current selection process (if any).
 
 **User Tiers & Limits:**
@@ -357,54 +407,42 @@ def list_sudo(client, message: Message):
         message.reply_text("Sudo Users:\n" + "\n".join(f"- `{uid}`" for uid in sudo_users))
 
 
-@app.on_message(filters.command(["download", "dl"]) & (filters.chat(AUTHORIZED_USERS) | filters.user(sudo_users)))
-@check_active_download
-def download_command(client, message: Message):
-    user_id = message.from_user.id
-    global crunchyroll, license_handler, vid_token
-    if use_account:
-        if not Email or not Password:
-            print("ERROR: Email and Password required in config.py for account login.")
-            vid_token = auth.get_guest_token()
-            if not vid_token:
-                print("Failed to get guest token.")
-            print("WARNING: Using guest token due to missing credentials.")
+def search_button_label(result):
+    title = result.get("title", "Untitled")
+    if len(title) > 42:
+        title = title[:39].rstrip() + "..."
+    return f"({result.get('access', 'unknown')}) [{result.get('type', '?')}] {title}"
 
-        else:
-            vid_token = auth.get_user_token(Email, Password)
-            if not vid_token:
-                print("WARNING: Invalid email or password, falling back to guest token.")
-                vid_token = auth.get_guest_token()
-                if not vid_token:
-                    print("Failed to get guest token after login failure.")
-    else:
-        vid_token = auth.get_guest_token()
-        if not vid_token:
-            raise Exception("Failed to get guest token.")
 
-    crunchyroll = Crunchyroll(vid_token)
-    license_handler = CrunchyrollLicense()
-    print("Crunchyroll Authentication successful.")
-    if len(message.command) < 2:
-        message.reply_text(
-            "Please provide a Crunchyroll URL.\nExample: `/download <url>` or `/dl <url>`",
-            parse_mode=enums.ParseMode.MARKDOWN
-        )
+def show_search_results(client, user_id, query_text, status_msg):
+    edit_message(status_msg, f"Searching Crunchyroll for `{query_text}`...")
+    search_results = crunchyroll.search(query_text, limit=5)
+    if not search_results:
+        edit_message(status_msg, "No Crunchyroll search results found.")
+        if user_id in user_states:
+            del user_states[user_id]
         return
 
-    video_url = message.command[1]
-    status_msg = message.reply_text("Processing URL...")
+    state = user_states[user_id]
+    state["step"] = "select_search"
+    state["data"]["search_results"] = search_results
 
-    user_states[user_id] = {
-        "step": "initial",
-        "url": video_url,
-        "data": {},
-        "message": status_msg,
-        "is_series": False
-    }
+    buttons = [
+        [InlineKeyboardButton(search_button_label(result), callback_data=f"search_{index}")]
+        for index, result in enumerate(search_results)
+    ]
+    buttons.append([InlineKeyboardButton("Cancel", callback_data="cancel")])
 
+    edit_message(
+        status_msg,
+        "Select a Crunchyroll result:",
+        keyboard=InlineKeyboardMarkup(buttons)
+    )
+
+
+def process_download_url(client, user_id, video_url, status_msg):
     try:
-        if "watch" in video_url:
+        if "crunchyroll.com" in video_url and "/watch/" in video_url:
             match = re.search(r'"?https?://www\.crunchyroll\.com/(?:watch)/([^/?"\']+)', video_url)
             if not match:
                 edit_message(status_msg, "Invalid episode URL format.")
@@ -415,7 +453,8 @@ def download_command(client, message: Message):
             edit_message(status_msg, "Fetching video information...")
             video_info = crunchyroll.get_video_info(content_id)
             if not video_info:
-                edit_message(status_msg, "Video not found or not accessible.")
+                reason = crunchyroll.last_playback_error or "video not found or not accessible"
+                edit_message(status_msg, f"Video not accessible: {reason}")
                 del user_states[user_id]
                 return
 
@@ -440,47 +479,60 @@ def download_command(client, message: Message):
                 return
 
             user_states[user_id]["data"]["available_video_qualities"] = video_list
-
             ask_video_quality(client, user_id)
 
-        elif "series" in video_url:
+        elif "crunchyroll.com" in video_url and "/series/" in video_url:
             match = re.search(r'"?https?://www\.crunchyroll\.com/(?:series)/([^/?"\']+)', video_url)
             if not match:
                 edit_message(status_msg, "Invalid series URL format.")
                 del user_states[user_id]
                 return
-            # URL validated; get_content_info extracts series_id internally from the URL
 
             edit_message(status_msg, "Fetching series information...")
-            series_data, _ = crunchyroll.get_content_info(url=video_url)
+            series_data, series_info = crunchyroll.get_content_info(url=video_url)
             if not series_data or 'data' not in series_data or not series_data['data']:
                 edit_message(status_msg, "Series not found or no episodes available.")
                 del user_states[user_id]
                 return
 
             episodes = [
-                {'episode_no': ep.get('episode_number', idx + 1), 'guid': ep['id'], 'title': ep.get('title', f'Episode {idx+1}')}
+                {
+                    'episode_no': get_episode_display_number(ep, idx + 1),
+                    'guid': ep['id'],
+                    'title': get_episode_title(ep, idx + 1),
+                }
                 for idx, ep in enumerate(series_data['data'])
             ]
+            series_payload = series_info.get("data")
+            if isinstance(series_payload, list) and series_payload:
+                series_title = series_payload[0].get("title", "Unknown Series")
+            elif isinstance(series_payload, dict):
+                series_title = series_payload.get("title", "Unknown Series")
+            else:
+                series_title = "Unknown Series"
+            preview_lines = [
+                f"{idx}. E{episode['episode_no']} - {episode['title'][:45]}"
+                for idx, episode in enumerate(episodes[:15], start=1)
+            ]
+            if len(episodes) > 15:
+                preview_lines.append(f"... and {len(episodes) - 15} more")
 
             user_states[user_id]["data"]["episodes"] = episodes
-            user_states[user_id]["data"]["series_title"] = series_data['data'][0].get('series_title', 'Unknown Series')
+            user_states[user_id]["data"]["series_title"] = series_title
             user_states[user_id]["is_series"] = True
             user_states[user_id]["data"]["total_episodes"] = len(episodes)
 
             user_states[user_id]["step"] = "ask_episode_count"
             edit_message(
                 status_msg,
-                f"Found series '{user_states[user_id]['data']['series_title']}' with {len(episodes)} episodes.\n"
-                "How many episodes do you want to download (from the beginning)? Enter a number:",
+                f"Found series '{series_title}' with {len(episodes)} episodes.\n"
+                + "\n".join(preview_lines)
+                + "\n\nSend episodes: `10`, `1,2,3,5`, `1-10`, or `all`.",
                 keyboard=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel")]])
             )
 
         else:
-            edit_message(status_msg, "Invalid URL. Please provide a Crunchyroll 'watch' or 'series' URL.")
-            if user_id in user_states:
-                del user_states[user_id]
-            return
+            show_search_results(client, user_id, video_url, status_msg)
 
     except Exception as e:
         print(f"Error during initial processing for user {user_id}: {e}")
@@ -490,49 +542,107 @@ def download_command(client, message: Message):
             del user_states[user_id]
 
 
-@app.on_message(filters.text & ~filters.command(["start", "help", "download"]) & filters.private)
+@app.on_message(filters.command(["download", "dl"]) & DOWNLOAD_ACCESS_FILTER)
+@check_active_download
+def download_command(client, message: Message):
+    user_id = message.from_user.id
+    global crunchyroll, license_handler, vid_token
+    if use_account and Email and Password:
+        vid_token = auth.get_user_token(Email, Password, allow_guest_fallback=False)
+        if not vid_token:
+            message.reply_text(
+                f"Crunchyroll account login failed: `{auth.last_auth_error or 'unknown error'}`\n"
+                "Premium videos require a working account token. Set `use_account = False` for guest/free mode.",
+                parse_mode=enums.ParseMode.MARKDOWN
+            )
+            return
+    else:
+        vid_token = auth.get_guest_token()
+    if not vid_token:
+        raise Exception("Failed to authenticate with Crunchyroll.")
+
+    crunchyroll = Crunchyroll(
+        vid_token,
+        playback_endpoint=auth.playback_endpoint,
+        playback_user_agent=auth.playback_user_agent,
+    )
+    license_handler = CrunchyrollLicense()
+    print("Crunchyroll token ready.")
+    if len(message.command) < 2:
+        message.reply_text(
+            "Please provide a Crunchyroll URL or search title.\nExample: `/download one piece` or `/dl <url>`",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+        return
+
+    video_url = " ".join(message.command[1:]).strip()
+    status_msg = message.reply_text("Processing URL...")
+
+    user_states[user_id] = {
+        "step": "initial",
+        "url": video_url,
+        "data": {},
+        "message": status_msg,
+        "is_series": False
+    }
+
+    process_download_url(client, user_id, video_url, status_msg)
+
+
+@app.on_message(filters.text & ~filters.command([
+    "start", "help", "download", "dl", "cancel",
+    "addpremium", "rempremium", "listpremium",
+    "addsudo", "remsudo", "listsudo"
+]) & filters.private)
 def handle_text_reply(client, message: Message):
     user_id = message.from_user.id
     if user_id in user_states and user_states[user_id]["step"] == "ask_episode_count":
         state = user_states[user_id]
         status_msg = state["message"]
         try:
-            count = int(message.text.strip())
             total_episodes = state["data"]["total_episodes"]
-            if 0 < count <= total_episodes:
-                state["data"]["episodes_to_download_count"] = count
-                state["data"]["episodes"] = state["data"]["episodes"][:count]
+            episode_indices = parse_episode_selection(message.text.strip(), total_episodes)
+            state["data"]["episodes"] = [
+                state["data"]["episodes"][episode_index]
+                for episode_index in episode_indices
+            ]
+            state["data"]["episodes_to_download_count"] = len(state["data"]["episodes"])
 
-                first_episode_id = state["data"]["episodes"][0]['guid']
-                edit_message(status_msg, "Fetching info for first episode to determine options...")
+            edit_message(status_msg, "Fetching info for the first accessible selected episode...")
 
-                video_info = crunchyroll.get_video_info(first_episode_id)
+            video_info = None
+            mpd_content = None
+            for episode in state["data"]["episodes"]:
+                video_info = crunchyroll.get_video_info(episode["guid"])
                 if not video_info:
-                    edit_message(status_msg, "Could not fetch info for the first episode.")
-                    del user_states[user_id]
-                    return
-
+                    continue
                 _, mpd_content, _ = crunchyroll.get_pssh(video_info)
-                if not mpd_content:
-                    edit_message(status_msg, "Could not fetch MPD for the first episode.")
-                    del user_states[user_id]
-                    return
+                if mpd_content:
+                    break
 
-                video_list, _ = parse_mpd_content(mpd_content)
-                if not video_list:
-                    edit_message(status_msg, "No video streams found for the first episode.")
-                    del user_states[user_id]
-                    return
+            if not video_info or not mpd_content:
+                edit_message(
+                    status_msg,
+                    "Selected episodes are not accessible with the current token. Premium account access may be required."
+                )
+                del user_states[user_id]
+                return
 
-                state["data"]["video_info"] = video_info
-                state["data"]["available_video_qualities"] = video_list
+            video_list, _ = parse_mpd_content(mpd_content)
+            if not video_list:
+                edit_message(status_msg, "No video streams found for the selected episodes.")
+                del user_states[user_id]
+                return
 
-                ask_video_quality(client, user_id)
+            state["data"]["video_info"] = video_info
+            state["data"]["available_video_qualities"] = video_list
 
-            else:
-                message.reply_text(f"Invalid number. Please enter a number between 1 and {total_episodes}.")
+            ask_video_quality(client, user_id)
         except ValueError:
-            message.reply_text("Invalid input. Please enter a number.")
+            message.reply_text(
+                f"Invalid input. Send `10`, `1,2,3,5`, `1-10`, or `all` within 1-{state['data']['total_episodes']}.",
+                parse_mode=enums.ParseMode.MARKDOWN
+            )
         except Exception as e:
             print(f"Error processing episode count for user {user_id}: {e}")
             traceback.print_exc()
@@ -731,6 +841,22 @@ def handle_callback_query(client, query: CallbackQuery):
                 del active_downloads[user_id]
             return
 
+        if step == "select_search" and data.startswith("search_"):
+            search_index = int(data.split("_")[1])
+            search_results = state["data"].get("search_results", [])
+            if search_index < 0 or search_index >= len(search_results):
+                query.answer("Invalid search result.", show_alert=True)
+                return
+            selected = search_results[search_index]
+            query.answer(f"Selected: {selected['title'][:50]}")
+            state["url"] = selected["url"]
+            state["data"] = {}
+            state["is_series"] = False
+            state["step"] = "initial"
+            edit_message(status_msg, f"Selected `{selected['title']}`. Processing...")
+            process_download_url(client, user_id, selected["url"], status_msg)
+            return
+
         if step == "select_quality" and data.startswith("quality_"):
             quality_index = int(data.split("_")[1])
             selected_quality = state["data"]["available_video_qualities"][quality_index]
@@ -883,7 +1009,8 @@ def process_download(client, user_id):
 
                 video_info = crunchyroll.get_video_info(ep_id)
                 if not video_info:
-                    edit_message(status_msg, f"{ep_num_str}: Failed to fetch video info. Skipping.")
+                    reason = crunchyroll.last_playback_error or "not accessible"
+                    edit_message(status_msg, f"{ep_num_str}: {reason}. Skipping.")
                     continue
 
                 pssh, mpd_content, token = crunchyroll.get_pssh(video_info)
@@ -891,17 +1018,17 @@ def process_download(client, user_id):
                     edit_message(status_msg, f"{ep_num_str}: Failed to fetch MPD. Skipping.")
                     continue
 
-                license_data = license_handler.get_license(pssh, token, ep_id, vid_token)
-                license_data = license_data["key"]
-                if not license_data:
+                video_key_str = get_decryption_key(license_handler.get_license(pssh, token, ep_id, vid_token))
+                if not video_key_str:
                     edit_message(status_msg, f"{ep_num_str}: Failed to get video license key. Skipping.")
                     continue
-                for key in license_data:
-                    video_key_str = "{}:{}".format(key["kid_hex"], key["key_hex"])
 
                 selected_video_quality = state["data"]["selected_video_quality"]
                 episode_video_list, _ = parse_mpd_content(mpd_content)
                 selected_video_quality = next((video for video in episode_video_list if video['height'] == selected_video_quality['height']), None)
+                if not selected_video_quality:
+                    edit_message(status_msg, f"{ep_num_str}: Selected video quality is not available. Skipping.")
+                    continue
 
                 vidseg = get_segment_link_list(mpd_content, selected_video_quality['name'], selected_video_quality['base_url'])
                 if not vidseg or "all" not in vidseg:
@@ -929,10 +1056,7 @@ def process_download(client, user_id):
                     if not audio_mpd:
                         continue
 
-                    audio_license_data = license_handler.get_license(audio_pssh, audio_token, target_guid, vid_token)
-                    audio_license_data = audio_license_data["key"]
-                    for key in audio_license_data:
-                        audio_keys = "{}:{}".format(key["kid_hex"], key["key_hex"])
+                    audio_keys = get_decryption_key(license_handler.get_license(audio_pssh, audio_token, target_guid, vid_token))
                     if not audio_keys:
                         continue
                     _, audio_mpd_audio_list = parse_mpd_content(audio_mpd)
@@ -1049,10 +1173,7 @@ def process_download(client, user_id):
 
             edit_message(status_msg, "Starting download...")
 
-            license_key = license_handler.get_license(pssh, token, content_id, vid_token)
-            license_key = license_key["key"]
-            for i in license_key:
-                video_key_str = "{}:{}".format(i["kid_hex"], i["key_hex"])
+            video_key_str = get_decryption_key(license_handler.get_license(pssh, token, content_id, vid_token))
             if not video_key_str:
                 raise Exception("Failed to get video license key.")
 
@@ -1073,10 +1194,10 @@ def process_download(client, user_id):
                 if not audio_mpd:
                     continue
 
-                audio_license_data = license_handler.get_license(audio_pssh, audio_token, guid, vid_token)
-                audio_license_data = audio_license_data["key"]
-                for i in audio_license_data:
-                    audio_keys = "{}:{}".format(i["kid_hex"], i["key_hex"])
+                audio_keys = get_decryption_key(license_handler.get_license(audio_pssh, audio_token, guid, vid_token))
+                if not audio_keys:
+                    print(f"Warning: Failed to get audio license key for {locale_name}. Skipping audio track.")
+                    continue
 
                 _, audio_mpd_audio_list = parse_mpd_content(audio_mpd)
                 highest_audio = max(audio_mpd_audio_list, key=lambda x: int(x.get('bandwidth', 0)), default=None)
@@ -1159,7 +1280,8 @@ def download_decrypt_merge_single(
     temp_files.extend([f"Downloads/{enc_video_path}", dec_video_path])
     try:
         edit_message(status_msg, f"{progress_prefix}Downloading video... \n\n `{dec_video_path}` \n\n P.S: It takes few minutes to download depending on the quality of the video selected.")
-        download_segment(vidseg["all"], os.path.splitext(enc_video_path)[0], "mp4")
+        segment_headers = {"User-Agent": auth.playback_user_agent}
+        download_segment(vidseg["all"], os.path.splitext(enc_video_path)[0], "mp4", headers=segment_headers)
         edit_message(status_msg, f"{progress_prefix}Video download complete.")
 
         for i, audio in enumerate(detailed_audios):
@@ -1167,7 +1289,7 @@ def download_decrypt_merge_single(
             edit_message(status_msg, f"{progress_prefix}Downloading audio {i+1}/{len(detailed_audios)} ({locale})... \n\n `{title}_{locale}.m4a` \n\n P.S: It takes few minutes to download depending on the number of audio selected.")
             enc_audio_base = f"enc_{title}_{locale}"
             enc_audio_path = f"{enc_audio_base}.m4a"
-            download_segment(audio['segment']["all"], enc_audio_base, "m4a")
+            download_segment(audio['segment']["all"], enc_audio_base, "m4a", headers=segment_headers)
             temp_files.append(enc_audio_path)
             edit_message(status_msg, f"{progress_prefix}Audio '{locale}' download complete.")
 
@@ -1227,6 +1349,8 @@ def download_decrypt_merge_single(
 
         ffmpeg_cmd_list = [
             ffmpeg_path if ffmpeg_path else "ffmpeg",
+            "-nostdin",
+            "-y",
             "-i", dec_video_path
         ]
 

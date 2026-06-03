@@ -16,9 +16,23 @@ env/
 Downloads/
 Temp/
 
+# Local output artifacts
+*.mp4
+*.m4a
+*.mkv
+*.srt
+*.ass
+*.vtt
+*.jpg
+*.png
+
+# Environment files
+.env
+
 # Session files
 *.session
 *.session-journal
+.crunchyroll_tokens/
 
 # Log files
 *.log

@@ -1,32 +1,114 @@
 
-print("Hello Welcome to Crunchyroll Downloader")
-from crunchyroll import Crunchyroll, CrunchyrollAuth, CrunchyrollLicense, parse_mpd_content, get_segment_link_list, download_segment, get_filter_complex, convert_vtt_to_srt_custom
 import re
 import os
 import shlex
+import sys
+from crunchyroll import (
+    Crunchyroll, CrunchyrollAuth, CrunchyrollLicense,
+    parse_mpd_content, get_segment_link_list, download_segment,
+    get_filter_complex, convert_vtt_to_srt_custom,
+    get_episode_display_number, get_episode_season_title,
+    get_episode_title, parse_episode_selection, set_cr_debug,
+)
 from config import *
 
+
+HELP_TEXT = """Usage: python cli.py [--debug]
+
+Interactive Crunchyroll downloader.
+
+Options:
+  --debug    Show safe auth/playback endpoint status details.
+
+Inputs:
+  URL or title search: one piece
+  Search result: 1
+  Episodes: 10        first 10 episodes
+            1,2,3,5   exact list numbers
+            1-10      range of list numbers
+            all       every listed episode
+"""
+
+if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+    print(HELP_TEXT)
+    raise SystemExit(0)
+
+CLI_DEBUG = any(arg == "--debug" for arg in sys.argv[1:]) or bool(debug)
+set_cr_debug(CLI_DEBUG)
+
+print("Hello Welcome to Crunchyroll Downloader")
 
 
 hard_subtitle = None
 
 
-if debug: 
+def format_episode_row(index, episode):
+    episode_no = get_episode_display_number(episode, index)
+    title = get_episode_title(episode, index)
+    season_title = get_episode_season_title(episode)
+    if season_title:
+        return f"{index:>4}. E{episode_no} - {title} [{season_title}]"
+    return f"{index:>4}. E{episode_no} - {title}"
+
+
+def print_series_episode_list(series_title, seasons, episodes):
+    print(f"Series: {series_title}")
+    print(f"Seasons: {len(seasons)}")
+    print(f"Total episodes listed: {len(episodes)}")
+    if seasons:
+        print("Season summary:")
+        for index, season in enumerate(seasons, start=1):
+            count = season.get("loaded_episodes") or season.get("number_of_episodes") or 0
+            print(f"  {index}. {season.get('title', 'Unknown Season')} - {count} episodes")
+    print("Episode list:")
+    for index, episode in enumerate(episodes, start=1):
+        print(format_episode_row(index, episode))
+
+
+if CLI_DEBUG:
    import logging
    logging.basicConfig(level=level)
 auth = CrunchyrollAuth()
-if use_account:
-    if Email == "" or Password == "":
-        print("Please enter your email and password in the config.py file")
-        exit()
-    vid_token = auth.get_user_token(Email, Password)
+if use_account and Email and Password:
+    vid_token = auth.get_user_token(Email, Password, allow_guest_fallback=False)
     if not vid_token:
-        print("Invalid email or password")
+        print(f"Crunchyroll account login failed: {auth.last_auth_error or 'unknown error'}")
+        print("Premium videos require a working account token. Set use_account = False for guest/free mode.")
         exit()
-else:    
+else:
     vid_token = auth.get_guest_token()
-crunchyroll = Crunchyroll(vid_token)
-video_url = input("Enter the Crunchyroll video URL: ")
+if not vid_token:
+    print("Failed to authenticate with Crunchyroll")
+    exit()
+crunchyroll = Crunchyroll(
+    vid_token,
+    playback_endpoint=auth.playback_endpoint,
+    playback_user_agent=auth.playback_user_agent,
+)
+video_url = input("Enter the Crunchyroll video URL or search title: ").strip()
+
+if "crunchyroll.com" not in video_url:
+    search_results = crunchyroll.search(video_url, limit=5)
+    if not search_results:
+        print("No Crunchyroll search results found.")
+        exit()
+
+    print("Select a search result:")
+    for index, result in enumerate(search_results, start=1):
+        print(f"{index}. ({result['access']}) [{result['type']}] {result['title']}")
+
+    try:
+        search_choice = int(input("Enter result number: ")) - 1
+    except ValueError:
+        print("Invalid search result")
+        exit()
+
+    if search_choice < 0 or search_choice >= len(search_results):
+        print("Invalid search result")
+        exit()
+
+    video_url = search_results[search_choice]["url"]
+    print(f"Selected: {search_results[search_choice]['title']}")
 
 
 if "watch" in video_url:
@@ -35,10 +117,11 @@ if "watch" in video_url:
         print("Invalid URL")
         exit()
     id =  match.group(1)
-    video_info = crunchyroll.get_video_info(id) 
+    video_info = crunchyroll.get_video_info(id)
 
     if not video_info:
-        print("Video not found")
+        reason = crunchyroll.last_playback_error or "video not found"
+        print(f"Video not accessible: {reason}")
         exit()
     pssh, mpd__content, token = crunchyroll.get_pssh(video_info)
     video_list, audio_list = parse_mpd_content(mpd__content)
@@ -160,14 +243,15 @@ if "watch" in video_url:
 
     print("Downloading video file...")  
 
-    download_segment(vidseg["all"],"enc_"+Title,"mp4")  
+    segment_headers = {"User-Agent": crunchyroll.playback_user_agent}
+    download_segment(vidseg["all"],"enc_"+Title,"mp4", headers=segment_headers)  
 
     print("Video downloaded successfully")  
 
     print("Downloading audio file...")  
 
     for audio in selected_audios:
-        download_segment(audio['segment']["all"], f"enc_{Title}_{audio['audio_locale']}", "m4a")
+        download_segment(audio['segment']["all"], f"enc_{Title}_{audio['audio_locale']}", "m4a", headers=segment_headers)
         print(f"Audio {audio['audio_locale']} downloaded successfully") 
 
 
@@ -279,38 +363,62 @@ if "watch" in video_url:
 
 else:
     aka = 1
-    crunchyroll = Crunchyroll(vid_token)
+    crunchyroll = Crunchyroll(
+        vid_token,
+        playback_endpoint=auth.playback_endpoint,
+        playback_user_agent=auth.playback_user_agent,
+    )
     match = re.search(r'"?https?://www\.crunchyroll\.com/(?:series)/([^/"]+)', video_url)
     if not match:
         print("Invalid URL")
         exit()
-    print("Batch mode is enabled. This will download all episodes of the series.")
-    data, _ = crunchyroll.get_content_info(url=video_url)
-    if not data:
-            print("Series not found")
-            exit()
+    print("Batch mode is enabled.")
+    data, series_info = crunchyroll.get_content_info(url=video_url)
+    if not data or not data.get("data"):
+        print("Series not found")
+        exit()
+    series_payload = series_info.get("data")
+    if isinstance(series_payload, list) and series_payload:
+        series_title = series_payload[0].get("title", "Unknown Series")
+    elif isinstance(series_payload, dict):
+        series_title = series_payload.get("title", "Unknown Series")
+    else:
+        series_title = "Unknown Series"
     Episode_List = [
-               {
-              'Episode_no': episode['episode_number'],
-              'guid': episode['id']
-               }
-             for episode in data['data']
-            ]
-    A = int(input("Select the number of episode to be downloaded:"))
-    if A >= len(Episode_List):
-        print("Invalid episode number")
+        {
+            'Episode_no': get_episode_display_number(episode, idx + 1),
+            'guid': episode['id'],
+            'title': get_episode_title(episode, idx + 1),
+            'season_title': get_episode_season_title(episode),
+            'raw': episode,
+        }
+        for idx, episode in enumerate(data['data'])
+    ]
+    print_series_episode_list(series_title, data.get("seasons") or [], data["data"])
+    episode_input = input(
+        "Select episodes to download (10 = first 10, 1,2,3,5, 1-10, or all): "
+    )
+    try:
+        selected_episode_indices = parse_episode_selection(episode_input, len(Episode_List))
+    except ValueError as error:
+        print(f"Invalid episode selection: {error}")
         exit()
     selected_audio_locales = []
     video_quality = 0
     subtitle_indices = []
-    for i in range (0,A):
-        print("Downloading episode",i+1)
-        id = Episode_List[i]['guid']
+    for download_index, episode_index in enumerate(selected_episode_indices, start=1):
+        episode_entry = Episode_List[episode_index]
+        print(
+            f"Downloading {download_index}/{len(selected_episode_indices)}: "
+            f"E{episode_entry['Episode_no']} - {episode_entry['title']}"
+        )
+        id = episode_entry['guid']
 
-        video_info = crunchyroll.get_video_info(id) 
+        video_info = crunchyroll.get_video_info(id)
         if not video_info:
-            print("Video not found")
-            exit()
+            reason = crunchyroll.last_playback_error or "premium account access may be required"
+            print(f"Episode not accessible with the current token ({reason}). Skipping.")
+            continue
         pssh, mpd__content, token = crunchyroll.get_pssh(video_info)
         video_list, audio_list = parse_mpd_content(mpd__content)
         if aka == 1:
@@ -443,14 +551,15 @@ else:
 
         print("Downloading video file...")      
 
-        download_segment(vidseg["all"],"enc_"+Title,"mp4")      
+        segment_headers = {"User-Agent": crunchyroll.playback_user_agent}
+        download_segment(vidseg["all"],"enc_"+Title,"mp4", headers=segment_headers)      
 
         print("Video downloaded successfully")      
 
         print("Downloading audio file...")      
 
         for audio in selected_audios:
-            download_segment(audio['segment']["all"], f"enc_{Title}_{audio['audio_locale']}", "m4a")
+            download_segment(audio['segment']["all"], f"enc_{Title}_{audio['audio_locale']}", "m4a", headers=segment_headers)
             print(f"Audio {audio['audio_locale']} downloaded successfully")     
     
 

@@ -2,7 +2,7 @@
 if you want to use an account, set use_account to True and fill in the email and password.
 if you want to use a guest account, set use_account to False and leave email and password empty.
 '''
-use_account = False
+use_account = True
 Email = "" #Your email here
 Password = "" #Your password here
 
@@ -31,6 +31,7 @@ debug = False
 level = ""
 max_retries = 3 # Number of retries for failed downloads
 retry_delay = 2 # seconds
+download_threads = 8 # Segment download concurrency (lower for fewer failures)
 
 #proxy settings
 
