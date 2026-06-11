@@ -6,8 +6,9 @@ import re
 import json
 from lxml import etree
 import base64
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin
 import os
+import requests
 import subprocess
 import contextlib
 from pathlib import Path
@@ -18,6 +19,21 @@ from config import *
 import shutil
 
 CR_API_BASE = "https://beta-api.crunchyroll.com"
+CR_ETP_TOKEN_URL = "https://www.crunchyroll.com/auth/v1/token"
+CR_SSO_LOGIN_URL = "https://sso.crunchyroll.com/api/login"
+CR_SSO_AUTHORIZE_URL = "https://sso.crunchyroll.com/authorize"
+CR_ETP_AUTHORIZATION = "Basic bm9haWhkZXZtXzZpeWcwYThsMHE6"
+CR_ETP_USER_AGENT = (
+    "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/148.0.0.0 Mobile Safari/537.36"
+)
+CR_ETP_DEVICE_TYPE = "Chrome on Android"
+CR_OAUTH_CLIENT_BASIC = "bm1oaGcwbDZ4eXhjZm02aHQ2aGY6SjR6bU1mdjNkMVFkWHk4dDk2d1NjeDdoUnkzclBHLTM="
+CR_OAUTH_CLIENT_AUTH = f"Basic {CR_OAUTH_CLIENT_BASIC}"
+CR_OAUTH_USER_AGENT = (
+    "Crunchyroll/ANDROIDTV/3.61.0_22341 (Android 12; en-US; SHIELD Android TV Build/SR1A.211012.001)"
+)
 CR_PLAYBACK_BASE = "https://cr-play-service.prd.crunchyrollsvc.com/v3"
 CR_PLAYBACK_TOKEN_BASE = "https://cr-play-service.prd.crunchyrollsvc.com/v1/token"
 CR_LICENSE_URL = "https://cr-license-proxy.prd.crunchyrollsvc.com/v1/license/widevine"
@@ -62,6 +78,43 @@ CR_AUTH_PROFILES = (
     },
 )
 
+APP_ROOT = Path(__file__).resolve().parent
+DOWNLOADS_DIR = APP_ROOT / "Downloads"
+TEMP_DIR = APP_ROOT / "Temp"
+
+
+def ensure_workspace_dirs():
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_download_path(*parts, create_parent=False):
+    ensure_workspace_dirs()
+    path = DOWNLOADS_DIR.joinpath(*parts)
+    if create_parent:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def get_temp_path(*parts, create_parent=False):
+    ensure_workspace_dirs()
+    path = TEMP_DIR.joinpath(*parts)
+    if create_parent:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def get_segment_temp_dir(name):
+    path = Path(get_temp_path(name, "segments"))
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def get_encrypted_media_path(name, extension):
+    path = Path(get_temp_path(name, f"{name}.{extension}"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
 
 def set_cr_debug(enabled):
     global CR_DEBUG
@@ -102,9 +155,15 @@ class CrunchyrollBase:
         self.session.headers.update(headers)
 
     def request(self, method, url, **kwargs):
-        if use_proxy:
+        if use_proxy and proxy:
             kwargs.setdefault("proxy", proxy)
         return getattr(self.session, method)(url, **kwargs)
+
+
+def _http_request(method, url, **kwargs):
+    if use_proxy and proxy:
+        kwargs.setdefault("proxies", {"http": proxy, "https": proxy})
+    return requests.request(method, url, **kwargs)
 
 
 def _config_value(*names):
@@ -260,9 +319,8 @@ class CrunchyrollLicense(CrunchyrollBase):
                     self.request("patch", f"{CR_PLAYBACK_TOKEN_BASE}/{content_id}/{token}/inactive", json={})
 
 def download_segment(segment_links, name, format, max_threads=20, headers=None, user_agent=None):
-    base_temp_dir = os.path.join("Temp", name)
-    output_filename = name + '.' + format
-    os.makedirs(base_temp_dir, exist_ok=True)
+    base_temp_dir = get_segment_temp_dir(name)
+    output_path = get_encrypted_media_path(name, format)
 
     total = len(segment_links)
     configured_threads = globals().get("download_threads")
@@ -387,8 +445,6 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
         raise RuntimeError("Download failed: one or more segments could not be retrieved.")
 
    
-    os.makedirs("Downloads", exist_ok=True)
-    output_path = os.path.join("Downloads", output_filename)
     with open(output_path, 'wb') as out_file:
         for data in buffers:
             if data:
@@ -397,6 +453,7 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
     shutil.rmtree(base_temp_dir, ignore_errors=True)
 
     print(f"[INFO] Downloaded and saved as: {output_path}")
+    return output_path
 
 def convert_vtt_to_srt_custom(vtt_path, srt_path):
     with open(vtt_path, "r", encoding="utf-8") as vtt_file:
@@ -724,6 +781,7 @@ class CrunchyrollAuth(CrunchyrollBase):
         self.playback_user_agent = None
         self.last_auth_error = None
         self.last_auth_context = None
+        self.last_token_payload = {}
 
     def _set_auth_headers(self, authorization_header, user_agent, extra_headers=None):
         headers = {
@@ -781,6 +839,40 @@ class CrunchyrollAuth(CrunchyrollBase):
     def _token_cache_path(self, profile):
         name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", profile["name"])
         return self._token_cache_dir() / f"{name}.json"
+
+    def _etp_rt_cache_path(self):
+        return self._token_cache_dir() / "etp_rt.json"
+
+    def _read_etp_rt_cache(self):
+        path = self._etp_rt_cache_path()
+        if not path.is_file():
+            return {}
+        try:
+            with path.open("r", encoding="utf-8") as token_file:
+                payload = json.load(token_file)
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    def _write_etp_rt_cache(self, payload, etp_rt, device_id):
+        if not payload:
+            return
+        token_payload = dict(payload)
+        token_payload["device_id"] = device_id
+        token_payload["etp_rt"] = etp_rt
+        if token_payload.get("expires_in"):
+            token_payload["expires_at"] = int(time.time()) + int(token_payload["expires_in"])
+        try:
+            path = self._etp_rt_cache_path()
+            with path.open("w", encoding="utf-8") as token_file:
+                json.dump(token_payload, token_file, indent=2)
+            with contextlib.suppress(Exception):
+                path.chmod(0o600)
+        except Exception:
+            return
+
+    def _configured_etp_rt(self):
+        return str(_config_value("etp_rt_token", "CRUNCHYROLL_ETP_RT", "ETP_RT") or "").strip()
 
     def _crd_token_paths(self, profile):
         configured_dir = _config_value("crd_token_dir", "CRD_TOKEN_DIR", "crd_config_dir", "CRD_CONFIG_DIR")
@@ -1004,6 +1096,264 @@ class CrunchyrollAuth(CrunchyrollBase):
             self._write_cached_token(profile, payload, device_id)
         return payload
 
+    @staticmethod
+    def _client_id_from_basic(authorization):
+        token = authorization.removeprefix("Basic ").strip()
+        decoded = base64.b64decode(token).decode("utf-8")
+        return decoded.split(":", 1)[0]
+
+    @staticmethod
+    def _generate_code_verifier(length=64):
+        allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+        return "".join(random.choice(allowed) for _ in range(length))
+
+    @staticmethod
+    def _extract_oauth_code(body):
+        text = (body or "").replace("\\u0026", "&").replace('\\"', '"')
+        for pattern in (
+            r"(?:[?&]|\\u0026)code=([A-Za-z0-9\-_]+)",
+            r"code=([A-Za-z0-9\-_]+)",
+            r'"code"\s*:\s*"([A-Za-z0-9\-_]+)"',
+        ):
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        return ""
+
+    def _sso_password_login(self, email, password):
+        payload = json.dumps({"email": email, "password": password, "eventSettings": {}})
+        headers = {
+            "Content-Type": "text/plain; charset=UTF-8",
+            "User-Agent": CR_OAUTH_USER_AGENT,
+        }
+        try:
+            response = _http_request(
+                "post",
+                CR_SSO_LOGIN_URL,
+                data=payload,
+                headers=headers,
+                timeout=60,
+            )
+        except Exception as exc:
+            self._set_last_auth_error("sso_login", message=str(exc))
+            return None
+
+        cr_debug(f"auth sso_login: status={response.status_code}")
+        if response.status_code != 200:
+            self._set_last_auth_error("sso_login", response=response)
+            return None
+
+        etp_rt = response.cookies.get("etp_rt")
+        if not etp_rt:
+            self._set_last_auth_error("sso_login", message="etp_rt cookie not received")
+            return None
+        return str(etp_rt)
+
+    def _oauth_code_login(self, etp_rt):
+        client_id = self._client_id_from_basic(CR_OAUTH_CLIENT_AUTH)
+        code_verifier = self._generate_code_verifier()
+        auth_device_id = str(uuid.uuid4())
+        query = {
+            "client_id": client_id,
+            "redirect_uri": "sso.crunchyroll://auth",
+            "response_type": "code",
+            "scope": "offline_access",
+            "state": '{"flow":"SIGN_IN","flowRoot":"ONBOARDING"}',
+            "code_challenge": code_verifier,
+            "code_challenge_method": "plain",
+        }
+        authorize_url = f"{CR_SSO_AUTHORIZE_URL}?{urlencode(query)}"
+        cookies = {
+            "client_id": client_id,
+            "device_id": auth_device_id,
+            "etp_rt": etp_rt,
+            "c_locale": "en-US",
+        }
+        try:
+            response = _http_request(
+                "get",
+                authorize_url,
+                headers={"User-Agent": CR_OAUTH_USER_AGENT},
+                cookies=cookies,
+                timeout=60,
+                allow_redirects=True,
+            )
+        except Exception as exc:
+            self._set_last_auth_error("sso_authorize", message=str(exc))
+            return {}
+
+        auth_code = self._extract_oauth_code(response.text or "")
+        if not auth_code and "code=" in (response.url or ""):
+            auth_code = self._extract_oauth_code(response.url or "")
+        if not auth_code:
+            self._set_last_auth_error("sso_authorize", message="authorization code not found")
+            return {}
+
+        device_id = str(uuid.uuid4())
+        data = {
+            "code": auth_code,
+            "code_verifier": code_verifier,
+            "grant_type": "authorization_code",
+            "scope": "offline_access",
+            "device_id": device_id,
+            "device_type": "ANDROIDTV",
+            "device_name": "emu64xa",
+        }
+        headers = {
+            "Authorization": CR_OAUTH_CLIENT_AUTH,
+            "User-Agent": CR_OAUTH_USER_AGENT,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Request-Type": "SignIn",
+        }
+        token_cookies = {"etp_rt": etp_rt, "c_locale": "en-US"}
+        try:
+            token_response = _http_request(
+                "post",
+                f"{CR_API_BASE}/auth/v1/token",
+                data=data,
+                headers=headers,
+                cookies=token_cookies,
+                timeout=60,
+            )
+        except Exception as exc:
+            self._set_last_auth_error("sso_authorization_code", message=str(exc))
+            return {}
+
+        cr_debug(f"auth sso_authorization_code: status={token_response.status_code}")
+        payload = self._payload_from_response(token_response, "sso_authorization_code")
+        if payload:
+            payload["device_id"] = device_id
+            payload["etp_rt"] = etp_rt
+            self.playback_endpoint = "tv/android_tv"
+            self.playback_user_agent = CR_OAUTH_USER_AGENT
+        return payload
+
+    def get_etp_rt_token(self, etp_rt=None, force_refresh=False):
+        cached = self._read_etp_rt_cache()
+        if not force_refresh and self._has_valid_access_token(cached):
+            self.playback_endpoint = "web/chrome"
+            self.playback_user_agent = CR_ETP_USER_AGENT
+            self.last_token_payload = cached
+            return cached["access_token"]
+
+        refresh_token = (
+            etp_rt
+            or self._configured_etp_rt()
+            or cached.get("etp_rt")
+            or cached.get("refresh_token")
+            or ""
+        ).strip()
+        if not refresh_token:
+            return None
+
+        device_id = cached.get("device_id") or "4242c96b-e0fa-4d85-a217-7ad92d64a282"
+        headers = {
+            "Authorization": CR_ETP_AUTHORIZATION,
+            "User-Agent": CR_ETP_USER_AGENT,
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        cookies = {"etp_rt": refresh_token, "c_locale": "en-US"}
+        data = {
+            "grant_type": "etp_rt_cookie",
+            "device_id": device_id,
+            "device_type": CR_ETP_DEVICE_TYPE,
+        }
+        response = self.request(
+            "post",
+            CR_ETP_TOKEN_URL,
+            data=data,
+            headers=headers,
+            cookies=cookies,
+        )
+        cr_debug(f"auth etp_rt_cookie: status={response.status_code}")
+        payload = self._payload_from_response(response, "etp_rt_cookie")
+        if not payload:
+            return None
+
+        new_etp_rt = refresh_token
+        if hasattr(response, "cookies"):
+            cookie_etp_rt = response.cookies.get("etp_rt")
+            if cookie_etp_rt:
+                new_etp_rt = str(cookie_etp_rt)
+
+        self.playback_endpoint = "web/chrome"
+        self.playback_user_agent = CR_ETP_USER_AGENT
+        self.last_token_payload = payload
+        self._write_etp_rt_cache(payload, new_etp_rt, device_id)
+        return payload.get("access_token")
+
+    def _password_login_via_sso(self, email, password):
+        etp_rt = self._sso_password_login(email, password)
+        if not etp_rt:
+            return None
+
+        token = self.get_etp_rt_token(etp_rt=etp_rt, force_refresh=True)
+        if token:
+            return token
+
+        payload = self._oauth_code_login(etp_rt)
+        if not payload:
+            return None
+
+        self.last_token_payload = payload
+        self._write_etp_rt_cache(payload, etp_rt, str(payload.get("device_id") or uuid.uuid4()))
+        return payload.get("access_token")
+
+    def get_password_token(self, email, password, force_refresh=False):
+        if not force_refresh:
+            cached = self._read_etp_rt_cache()
+            if self._has_valid_access_token(cached):
+                self.playback_endpoint = "web/chrome"
+                self.playback_user_agent = CR_ETP_USER_AGENT
+                self.last_token_payload = cached
+                return cached["access_token"]
+
+        sso_token = self._password_login_via_sso(email, password)
+        if sso_token:
+            return sso_token
+
+        account_error = self.last_auth_error
+        account_context = self.last_auth_context
+        auth_profiles = self._profiles_with_crd_updates()
+        for profile in auth_profiles:
+            cached_payload = self._read_cached_token(profile)
+            if not force_refresh and self._has_valid_access_token(cached_payload):
+                self.playback_endpoint = profile["endpoint"]
+                self.playback_user_agent = profile["user_agent"]
+                self.last_token_payload = cached_payload
+                return cached_payload["access_token"]
+            refreshed_payload = self._refresh_cached_token(profile, cached_payload)
+            if refreshed_payload:
+                self.playback_endpoint = profile["endpoint"]
+                self.playback_user_agent = profile["user_agent"]
+                self.last_token_payload = refreshed_payload
+                return refreshed_payload["access_token"]
+            payload = self._password_login(profile, email, password)
+            if payload:
+                self.playback_endpoint = profile["endpoint"]
+                self.playback_user_agent = profile["user_agent"]
+                self.last_token_payload = payload
+                return payload["access_token"]
+            account_error = self.last_auth_error or account_error
+            account_context = self.last_auth_context or account_context
+
+        if account_error:
+            self.last_auth_error = account_error
+            self.last_auth_context = account_context
+        return None
+
+    def authenticate(self, email="", password="", etp_rt=None, allow_guest_fallback=False, force_refresh=False):
+        token = self.get_etp_rt_token(etp_rt=etp_rt or self._configured_etp_rt() or None, force_refresh=force_refresh)
+        if token:
+            return token
+        if email and password:
+            token = self.get_password_token(email, password, force_refresh=force_refresh)
+            if token:
+                return token
+        if allow_guest_fallback:
+            return self.get_guest_token()
+        return None
+
     def get_guest_token(self):
         self.playback_endpoint = "web/firefox"
         self.playback_user_agent = CR_WEB_USER_AGENT
@@ -1012,46 +1362,19 @@ class CrunchyrollAuth(CrunchyrollBase):
             "scope": "offline_access",
         }
         payload = self._post_token_payload(data, CR_WEB_AUTHORIZATION, CR_WEB_USER_AGENT, "guest")
+        if payload:
+            self.last_token_payload = payload
         return payload.get("access_token")
 
-    def get_user_token(self, email, password, allow_guest_fallback=True):
+    def get_user_token(self, email, password, allow_guest_fallback=True, force_refresh=False):
         self.playback_endpoint = None
-        account_error = None
-        account_context = None
-        auth_profiles = self._profiles_with_crd_updates()
-
-        for profile in auth_profiles:
-            cached_payload = self._read_cached_token(profile)
-            if self._has_valid_access_token(cached_payload):
-                self.playback_endpoint = profile["endpoint"]
-                self.playback_user_agent = profile["user_agent"]
-                cr_debug(f"using cached access token for {profile['name']}")
-                return cached_payload["access_token"]
-            refreshed_payload = self._refresh_cached_token(profile, cached_payload)
-            if refreshed_payload:
-                self.playback_endpoint = profile["endpoint"]
-                self.playback_user_agent = profile["user_agent"]
-                return refreshed_payload["access_token"]
-            account_error = self.last_auth_error or account_error
-            account_context = self.last_auth_context or account_context
-
-        for profile in auth_profiles:
-            payload = self._password_login(profile, email, password)
-            if payload:
-                self.playback_endpoint = profile["endpoint"]
-                self.playback_user_agent = profile["user_agent"]
-                return payload["access_token"]
-            account_error = self.last_auth_error or account_error
-            account_context = self.last_auth_context or account_context
-
-        if not allow_guest_fallback:
-            return None
-
-        guest_token = self.get_guest_token()
-        if guest_token and account_error:
-            self.last_auth_error = account_error
-            self.last_auth_context = account_context
-        return guest_token
+        return self.authenticate(
+            email,
+            password,
+            etp_rt=self._configured_etp_rt() or None,
+            allow_guest_fallback=allow_guest_fallback,
+            force_refresh=force_refresh,
+        )
 
 def get_filter_complex():
     
@@ -1065,12 +1388,21 @@ def get_filter_complex():
     )
 
 class Crunchyroll(CrunchyrollBase):
-    def __init__(self, token, playback_endpoint=None, playback_user_agent=None):
+    def __init__(self, token, playback_endpoint=None, playback_user_agent=None,
+                 auth_instance=None, email=None, password=None):
         super().__init__()
         self.token = token
         self.last_playback_error = None
         self.playback_endpoint = playback_endpoint
         self.playback_user_agent = playback_user_agent
+        # Store auth context for automatic token refresh
+        self._auth = auth_instance
+        self._email = email
+        self._password = password
+        self._token_acquired_at = time.time()
+        # Crunchyroll access tokens typically expire in 300s (5 min);
+        # refresh proactively 60s before expiry to avoid mid-request failures
+        self._token_ttl = 240
         playback_endpoints = list(CR_PLAYBACK_ENDPOINTS)
         if playback_endpoint:
             playback_endpoints = [playback_endpoint] + [
@@ -1078,6 +1410,9 @@ class Crunchyroll(CrunchyrollBase):
                 if endpoint != playback_endpoint
             ]
         self.playback_endpoints = tuple(playback_endpoints)
+        self._apply_token_headers(token)
+
+    def _apply_token_headers(self, token):
         self.set_headers({
             "authorization": f"Bearer {token}",
             "accept": "application/json",
@@ -1086,6 +1421,38 @@ class Crunchyroll(CrunchyrollBase):
             "user-agent": CR_WEB_USER_AGENT,
             "x-datadog-sampling-priority": "0",
         }, replace=True)
+
+    def _ensure_valid_token(self):
+        """Refresh the access token if it is expired or about to expire."""
+        if not self._auth:
+            return
+        elapsed = time.time() - self._token_acquired_at
+        if elapsed < self._token_ttl:
+            return
+        cr_debug(f"access token is {int(elapsed)}s old, refreshing...")
+        try:
+            new_token = self._auth.authenticate(
+                self._email or "",
+                self._password or "",
+                etp_rt=self._auth._configured_etp_rt() or None,
+                allow_guest_fallback=bool(globals().get("allow_guest_fallback", True)),
+                force_refresh=True,
+            )
+            if new_token and new_token != self.token:
+                self.token = new_token
+                self._token_acquired_at = time.time()
+                self.playback_endpoint = self._auth.playback_endpoint
+                self.playback_user_agent = self._auth.playback_user_agent
+                self._apply_token_headers(new_token)
+                cr_debug("access token refreshed successfully")
+            elif new_token:
+                # Same token returned (cache hit), just reset the timer
+                self._token_acquired_at = time.time()
+                cr_debug("access token still valid per auth cache")
+            else:
+                cr_debug(f"token refresh failed: {self._auth.last_auth_error}")
+        except Exception as error:
+            cr_debug(f"token refresh error: {error}")
 
     def _playback_user_agent(self, endpoint):
         if endpoint == self.playback_endpoint and self.playback_user_agent:
@@ -1097,6 +1464,7 @@ class Crunchyroll(CrunchyrollBase):
         return Miscellaneous().randomize_user_agent()
 
     def _get_json(self, url, params=None):
+        self._ensure_valid_token()
         response = self.request("get", url, params=params)
         if response.status_code != 200:
             print(f"Crunchyroll request failed ({response.status_code}): {url}")
@@ -1338,6 +1706,7 @@ class Crunchyroll(CrunchyrollBase):
         }, series_info
 
     def get_video_info(self, content_id):
+        self._ensure_valid_token()
         last_response = None
         self.last_playback_error = None
         for endpoint in self.playback_endpoints:

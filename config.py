@@ -3,8 +3,10 @@ if you want to use an account, set use_account to True and fill in the email and
 if you want to use a guest account, set use_account to False and leave email and password empty.
 '''
 use_account = True
-Email = "" #Your email here
-Password = "" #Your password here
+Email = ""  # Your email here
+Password = ""  # Your password here
+etp_rt_token = ""  # Optional cached SSO refresh token
+allow_guest_fallback = False  # Fallback to guest token when account auth fails
 
 # --- Telegram Settings ---
 API_ID = 12345  # Replace with your API ID

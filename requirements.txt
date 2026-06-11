@@ -1,4 +1,5 @@
 tls-client
+requests
 lxml
 tqdm
 hachoir
