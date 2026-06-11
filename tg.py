@@ -15,7 +15,8 @@ from crunchyroll import (
     parse_mpd_content, get_segment_link_list, download_segment,
     get_filter_complex, convert_vtt_to_srt_custom,
     get_episode_display_number, get_episode_title,
-    parse_episode_selection
+    parse_episode_selection, get_download_path,
+    get_encrypted_media_path, get_temp_path
 )
 from config import *
 
@@ -565,6 +566,9 @@ def download_command(client, message: Message):
         vid_token,
         playback_endpoint=auth.playback_endpoint,
         playback_user_agent=auth.playback_user_agent,
+        auth_instance=auth,
+        email=Email if use_account else None,
+        password=Password if use_account else None,
     )
     license_handler = CrunchyrollLicense()
     print("Crunchyroll token ready.")
@@ -1018,7 +1022,7 @@ def process_download(client, user_id):
                     edit_message(status_msg, f"{ep_num_str}: Failed to fetch MPD. Skipping.")
                     continue
 
-                video_key_str = get_decryption_key(license_handler.get_license(pssh, token, ep_id, vid_token))
+                video_key_str = get_decryption_key(license_handler.get_license(pssh, token, ep_id, crunchyroll.token))
                 if not video_key_str:
                     edit_message(status_msg, f"{ep_num_str}: Failed to get video license key. Skipping.")
                     continue
@@ -1056,7 +1060,7 @@ def process_download(client, user_id):
                     if not audio_mpd:
                         continue
 
-                    audio_keys = get_decryption_key(license_handler.get_license(audio_pssh, audio_token, target_guid, vid_token))
+                    audio_keys = get_decryption_key(license_handler.get_license(audio_pssh, audio_token, target_guid, crunchyroll.token))
                     if not audio_keys:
                         continue
                     _, audio_mpd_audio_list = parse_mpd_content(audio_mpd)
@@ -1173,7 +1177,7 @@ def process_download(client, user_id):
 
             edit_message(status_msg, "Starting download...")
 
-            video_key_str = get_decryption_key(license_handler.get_license(pssh, token, content_id, vid_token))
+            video_key_str = get_decryption_key(license_handler.get_license(pssh, token, content_id, crunchyroll.token))
             if not video_key_str:
                 raise Exception("Failed to get video license key.")
 
@@ -1194,7 +1198,7 @@ def process_download(client, user_id):
                 if not audio_mpd:
                     continue
 
-                audio_keys = get_decryption_key(license_handler.get_license(audio_pssh, audio_token, guid, vid_token))
+                audio_keys = get_decryption_key(license_handler.get_license(audio_pssh, audio_token, guid, crunchyroll.token))
                 if not audio_keys:
                     print(f"Warning: Failed to get audio license key for {locale_name}. Skipping audio track.")
                     continue
@@ -1270,27 +1274,34 @@ def download_decrypt_merge_single(
     output_directory="", progress_prefix=""
 ):
 
-    base_filename = os.path.join(output_directory, title)
-    enc_video_path = f"enc_{title}.mp4"
-    dec_video_path = f"{base_filename}.mp4"
+    if output_directory:
+        final_output_dir = get_download_path(output_directory)
+        os.makedirs(final_output_dir, exist_ok=True)
+    else:
+        final_output_dir = get_download_path()
+
+    temp_job_dir = get_temp_path(output_directory or "_single", title)
+    os.makedirs(temp_job_dir, exist_ok=True)
+
+    base_filename = os.path.join(final_output_dir, title)
+    dec_video_path = os.path.join(temp_job_dir, f"{title}.mp4")
     audio_files = []
     subtitle_files = []
 
-    os.makedirs("Downloads", exist_ok=True)
-    temp_files.extend([f"Downloads/{enc_video_path}", dec_video_path])
+    temp_files.append(temp_job_dir)
+    temp_files.append(get_temp_path(f"enc_{title}"))
     try:
         edit_message(status_msg, f"{progress_prefix}Downloading video... \n\n `{dec_video_path}` \n\n P.S: It takes few minutes to download depending on the quality of the video selected.")
         segment_headers = {"User-Agent": auth.playback_user_agent}
-        download_segment(vidseg["all"], os.path.splitext(enc_video_path)[0], "mp4", headers=segment_headers)
+        download_segment(vidseg["all"], f"enc_{title}", "mp4", headers=segment_headers)
         edit_message(status_msg, f"{progress_prefix}Video download complete.")
 
         for i, audio in enumerate(detailed_audios):
             locale = audio['audio_locale']
             edit_message(status_msg, f"{progress_prefix}Downloading audio {i+1}/{len(detailed_audios)} ({locale})... \n\n `{title}_{locale}.m4a` \n\n P.S: It takes few minutes to download depending on the number of audio selected.")
             enc_audio_base = f"enc_{title}_{locale}"
-            enc_audio_path = f"{enc_audio_base}.m4a"
             download_segment(audio['segment']["all"], enc_audio_base, "m4a", headers=segment_headers)
-            temp_files.append(enc_audio_path)
+            temp_files.append(get_temp_path(enc_audio_base))
             edit_message(status_msg, f"{progress_prefix}Audio '{locale}' download complete.")
 
         if selected_subtitles:
@@ -1299,8 +1310,8 @@ def download_decrypt_merge_single(
                 sub_lang = sub['language']
                 sub_format = sub['format']
                 sub_url = sub['url']
-                sub_temp_path = f"{base_filename}_{sub_lang}.{sub_format}"
-                sub_final_path = f"{base_filename}_{sub_lang}.srt"
+                sub_temp_path = os.path.join(temp_job_dir, f"{title}_{sub_lang}.{sub_format}")
+                sub_final_path = os.path.join(temp_job_dir, f"{title}_{sub_lang}.srt")
 
                 curl_cmd = f"curl -fsSL -o {shlex.quote(sub_temp_path)} {shlex.quote(sub_url)}"
                 _, stderr, retcode = run_shell_command(curl_cmd)
@@ -1323,7 +1334,8 @@ def download_decrypt_merge_single(
             edit_message(status_msg, f"{progress_prefix}Subtitle downloads complete.")
 
         edit_message(status_msg, f"{progress_prefix}Decrypting video...")
-        decrypt_cmd = f"./mp4decrypt {shlex.quote(f'Downloads/enc_{title}.mp4')} {shlex.quote(f'{base_filename}.mp4')} --show-progress --key {video_key_str}"
+        enc_video_path = get_encrypted_media_path(f"enc_{title}", "mp4")
+        decrypt_cmd = f"./mp4decrypt {shlex.quote(enc_video_path)} {shlex.quote(dec_video_path)} --show-progress --key {video_key_str}"
         _, stderr, retcode = run_shell_command(decrypt_cmd)
         if retcode != 0:
             raise Exception(f"Video decryption failed: {stderr}")
@@ -1332,9 +1344,8 @@ def download_decrypt_merge_single(
         for i, audio in enumerate(detailed_audios):
             locale = audio['audio_locale']
             edit_message(status_msg, f"{progress_prefix}Decrypting audio {i+1}/{len(detailed_audios)} ({locale})...")
-            enc_audio_path = f"Downloads/enc_{title}_{locale}.m4a"
-            dec_audio_path = f"{base_filename}_{locale}.m4a"
-            temp_files.append(enc_audio_path)
+            enc_audio_path = get_encrypted_media_path(f"enc_{title}_{locale}", "m4a")
+            dec_audio_path = os.path.join(temp_job_dir, f"{title}_{locale}.m4a")
             decrypt_cmd = f"./mp4decrypt {shlex.quote(enc_audio_path)} {shlex.quote(dec_audio_path)} --show-progress --key {audio['key']}"
             _, stderr, retcode = run_shell_command(decrypt_cmd)
             if retcode != 0:
@@ -1413,7 +1424,6 @@ def download_decrypt_merge_single(
         watermark_suffix = f".{watermark_name}" if use_watermark else ""
 
         output_filename = f"{base_filename}.{quality_str}.[{audio_str}].[{sub_str}]{watermark_suffix}.{output_format}"
-        temp_files.append(output_filename)
 
         ffmpeg_cmd_list.extend(map_commands)
         ffmpeg_cmd_list.extend(metadata_commands)
@@ -1452,21 +1462,28 @@ def cleanup_files(file_paths):
         if file_path and os.path.exists(file_path):
             try:
                 if os.path.isdir(file_path):
-                    pass
+                    for root, dirs, files in os.walk(file_path, topdown=False):
+                        for file_name in files:
+                            os.remove(os.path.join(root, file_name))
+                        for dir_name in dirs:
+                            os.rmdir(os.path.join(root, dir_name))
+                    os.rmdir(file_path)
+                    if debug:
+                        print(f"Deleted directory: {file_path}")
                 else:
                     os.remove(file_path)
                     if debug:
                         print(f"Deleted file: {file_path}")
             except OSError as e:
                 print(f"Error deleting file {file_path}: {e}")
-    downloads_dir = "Downloads"
-    if os.path.exists(downloads_dir) and not os.listdir(downloads_dir):
+    temp_dir = get_temp_path()
+    if os.path.exists(temp_dir) and not os.listdir(temp_dir):
         try:
-            os.rmdir(downloads_dir)
+            os.rmdir(temp_dir)
             if debug:
-                print(f"Removed empty Downloads directory: {downloads_dir}")
+                print(f"Removed empty Temp directory: {temp_dir}")
         except OSError as e:
-            print(f"Could not remove empty Downloads directory: {e}")
+            print(f"Could not remove empty Temp directory: {e}")
 
 
 if __name__ == "__main__":

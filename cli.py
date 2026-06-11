@@ -2,6 +2,7 @@
 import re
 import os
 import shlex
+import shutil
 import sys
 from crunchyroll import (
     Crunchyroll, CrunchyrollAuth, CrunchyrollLicense,
@@ -9,6 +10,7 @@ from crunchyroll import (
     get_filter_complex, convert_vtt_to_srt_custom,
     get_episode_display_number, get_episode_season_title,
     get_episode_title, parse_episode_selection, set_cr_debug,
+    get_download_path, get_encrypted_media_path, get_temp_path,
 )
 from config import *
 
@@ -84,6 +86,9 @@ crunchyroll = Crunchyroll(
     vid_token,
     playback_endpoint=auth.playback_endpoint,
     playback_user_agent=auth.playback_user_agent,
+    auth_instance=auth,
+    email=Email if use_account else None,
+    password=Password if use_account else None,
 )
 video_url = input("Enter the Crunchyroll video URL or search title: ").strip()
 
@@ -148,14 +153,14 @@ if "watch" in video_url:
                 {'audio_locale': locale_map.get(video_info['versions'][choice]['audio_locale'], video_info['versions'][choice]['audio_locale']), 'guid': video_info['versions'][choice]['guid']}
                 for choice in audio_list
             ]
-    license_key = CrunchyrollLicense().get_license(pssh, token, id, vid_token) ["key"]
+    license_key = CrunchyrollLicense().get_license(pssh, token, id, crunchyroll.token) ["key"]
     for i in license_key:
           key = "{}:{}".format(i["kid_hex"], i["key_hex"])  
 
     for audio in selected_audios:
         info = crunchyroll.get_video_info(audio['guid'])
         pssh, mpd_content, token = crunchyroll.get_pssh(info)
-        license_key = CrunchyrollLicense().get_license(pssh, token, audio['guid'], vid_token) ["key"]
+        license_key = CrunchyrollLicense().get_license(pssh, token, audio['guid'], crunchyroll.token) ["key"]
         for i in license_key:
             audio['key'] = "{}:{}".format(i["kid_hex"], i["key_hex"])
         video_list, audio_list = parse_mpd_content(mpd_content)
@@ -244,6 +249,8 @@ if "watch" in video_url:
     print("Downloading video file...")  
 
     segment_headers = {"User-Agent": crunchyroll.playback_user_agent}
+    temp_title_dir = get_temp_path(Title, create_parent=True)
+    dec_video_path = get_temp_path(Title, f"{Title}.mp4", create_parent=True)
     download_segment(vidseg["all"],"enc_"+Title,"mp4", headers=segment_headers)  
 
     print("Video downloaded successfully")  
@@ -258,45 +265,48 @@ if "watch" in video_url:
     if selected_subtitles:
         print("Downloading subtitle file...")
         for subtitle in selected_subtitles:
-            os.system(f"curl {shlex.quote(subtitle['url'])} -o {shlex.quote(f'{Title}_{subtitle['language']}.{subtitle['format']}')}")
+            subtitle_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}", create_parent=True)
+            os.system(f"curl {shlex.quote(subtitle['url'])} -o {shlex.quote(subtitle_path)}")
         for subtitle in selected_subtitles:
             if subtitle['format'] == 'vtt':
-                convert_vtt_to_srt_custom(f"{Title}_{subtitle['language']}.{subtitle['format']}",f"{Title}_{subtitle['language']}.srt")
-                os.system(f"rm {shlex.quote(f'{Title}_{subtitle['language']}.{subtitle['format']}')}")  
+                source_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
+                converted_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.srt", create_parent=True)
+                convert_vtt_to_srt_custom(source_path, converted_path)
+                os.system(f"rm {shlex.quote(source_path)}")  
                 subtitle['format'] = "srt"
 
 
 
 
     print("Decrypting video file...")
-    os.system(f"./mp4decrypt {shlex.quote(f'Downloads/enc_{Title}.mp4')} {shlex.quote(f'{Title}.mp4')} --show-progress --key {key}")    
+    enc_video_path = get_encrypted_media_path(f"enc_{Title}", "mp4")
+    os.system(f"./mp4decrypt {shlex.quote(enc_video_path)} {shlex.quote(dec_video_path)} --show-progress --key {key}")    
 
     print("Decrypting audio file...")
     for audio in selected_audios:
         audio_locale = audio["audio_locale"]
-        input_path = f"Downloads/enc_{Title}_{audio_locale}.m4a"
-        output_path = f"{Title}_{audio_locale}.m4a"
+        input_path = get_encrypted_media_path(f"enc_{Title}_{audio_locale}", "m4a")
+        output_path = get_temp_path(Title, f"{Title}_{audio_locale}.m4a", create_parent=True)
         os.system(f"./mp4decrypt {shlex.quote(input_path)} {shlex.quote(output_path)} --show-progress --key {audio['key']}")
         print(f"Audio {audio_locale} decrypted successfully")
     print("All files decrypted successfully")
     print("Deleting Encoded files...")
-    os.system(f"rm -rf {shlex.quote(f'Downloads/enc_{Title}.mp4')}")
+    shutil.rmtree(get_temp_path(f"enc_{Title}"), ignore_errors=True)
     for audio in selected_audios:
-            input_path = f"Downloads/enc_{Title}_{audio_locale}.m4a"
-            os.system(f"rm -rf {input_path}")
+            shutil.rmtree(get_temp_path(f"enc_{Title}_{audio['audio_locale']}"), ignore_errors=True)
     print("temp  files deleted successfully")
     print("Merging video and audio files...")   
 
 
-    ffmpeg_command = f"{ffmpeg_path} -nostdin -y -i {shlex.quote(Title+'.mp4')}"    
+    ffmpeg_command = f"{ffmpeg_path} -nostdin -y -i {shlex.quote(dec_video_path)}"    
 
     for audio in selected_audios:
-        audio_file = f"{Title}_{audio['audio_locale']}.m4a"
+        audio_file = get_temp_path(Title, f"{Title}_{audio['audio_locale']}.m4a")
         ffmpeg_command += f" -i {shlex.quote(audio_file)}"  
 
     if selected_subtitles:
         for subtitle in selected_subtitles:
-            subtitle_file = f"{Title}_{subtitle['language']}.{subtitle['format']}"
+            subtitle_file = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
             ffmpeg_command += f" -i {shlex.quote(subtitle_file)}"   
 
 
@@ -313,7 +323,7 @@ if "watch" in video_url:
         for i in range(len(selected_audios) ,len(selected_audios) + len(selected_subtitles)):
             ffmpeg_command += f" -map {i+1}:s?" 
 
-    output_file = f"{Title}.{video['height']}p.["
+    output_name = f"{Title}.{video['height']}p.["
     for i, audio in enumerate(selected_audios, start=1):
         lang = audio['audio_locale']
         lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang,lang)
@@ -322,12 +332,12 @@ if "watch" in video_url:
         else:
            ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="[{lang}]"'
         if i == 1:
-           output_file += f"{lang}"
+           output_name += f"{lang}"
         else:
-            output_file += f"+{lang}"   
+            output_name += f"+{lang}"   
 
     if selected_subtitles:
-        output_file += f" ({audio_codec}) ] [" if use_watermark else f" ["
+        output_name += f" ({audio_codec}) ] [" if use_watermark else f" ["
         for i, subtitle in enumerate(selected_subtitles, start=0):
             lang = subtitle['language']
             lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang,lang)
@@ -336,13 +346,14 @@ if "watch" in video_url:
             else:
                 ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="[{lang}] [{subtitle["type"]}]"'
             if i == 0:
-               output_file += f"{lang} ({subtitle['format']})"
+               output_name += f"{lang} ({subtitle['format']})"
             else:
-               output_file += f"+ {lang} ({subtitle['format']})"
+               output_name += f"+ {lang} ({subtitle['format']})"
     else:
-        output_file += f" ({audio_codec})]" if use_watermark else f" ]" 
+        output_name += f" ({audio_codec})]" if use_watermark else f" ]" 
 
-    output_file += f"].{Watermark_Name}.{output_format}" if use_watermark else f"].{output_format}" 
+    output_name += f"].{Watermark_Name}.{output_format}" if use_watermark else f"].{output_format}" 
+    output_file = get_download_path(output_name, create_parent=True)
 
     ffmpeg_command += f" -c:v {encoding_code} -c:a {audio_codec} -c:s copy {shlex.quote(output_file)}"  
 
@@ -351,15 +362,7 @@ if "watch" in video_url:
     print("Video and audio files merged successfully")
     print("Deleting temporary files...")
     print("Temporary files deleted successfully")
-    os.system(f"rm -rf '{Title}.mp4'")
-    for audio in selected_audios:
-        audio_file = f"{Title}_{audio['audio_locale']}.m4a"
-        os.system(f"rm -rf '{audio_file}'")
-        os.system(f"rm -rf 'enc_{audio_file}'")
-    if selected_subtitles:
-        for subtitle in selected_subtitles:
-            subtitle_file = f"{Title}_{subtitle['language']}.{subtitle['format']}"
-            os.system(f"rm -rf '{subtitle_file}'")  
+    shutil.rmtree(temp_title_dir, ignore_errors=True)
 
 else:
     aka = 1
@@ -367,6 +370,9 @@ else:
         vid_token,
         playback_endpoint=auth.playback_endpoint,
         playback_user_agent=auth.playback_user_agent,
+        auth_instance=auth,
+        email=Email if use_account else None,
+        password=Password if use_account else None,
     )
     match = re.search(r'"?https?://www\.crunchyroll\.com/(?:series)/([^/"]+)', video_url)
     if not match:
@@ -455,14 +461,14 @@ else:
                 'guid': version['guid']
             })
 
-        license_key = CrunchyrollLicense().get_license(pssh, token, id, vid_token) ["key"]
+        license_key = CrunchyrollLicense().get_license(pssh, token, id, crunchyroll.token) ["key"]
         for i in license_key:
               key = "{}:{}".format(i["kid_hex"], i["key_hex"])      
 
         for audio in selected_audios:
             info = crunchyroll.get_video_info(audio['guid'])
             pssh, mpd_content, token = crunchyroll.get_pssh(info)
-            license_key = CrunchyrollLicense().get_license(pssh, token, audio['guid'], vid_token) ["key"]
+            license_key = CrunchyrollLicense().get_license(pssh, token, audio['guid'], crunchyroll.token) ["key"]
             for i in license_key:
                 audio['key'] = "{}:{}".format(i["kid_hex"], i["key_hex"])
             video_list, audio_list = parse_mpd_content(mpd_content)
@@ -552,6 +558,8 @@ else:
         print("Downloading video file...")      
 
         segment_headers = {"User-Agent": crunchyroll.playback_user_agent}
+        temp_title_dir = get_temp_path(Title, create_parent=True)
+        dec_video_path = get_temp_path(Title, f"{Title}.mp4", create_parent=True)
         download_segment(vidseg["all"],"enc_"+Title,"mp4", headers=segment_headers)      
 
         print("Video downloaded successfully")      
@@ -566,45 +574,48 @@ else:
         if selected_subtitles:
             print("Downloading subtitle file...")
             for subtitle in selected_subtitles:
-                os.system(f"curl {shlex.quote(subtitle['url'])} -o {shlex.quote(f'{Title}_{subtitle['language']}.{subtitle['format']}')}")
+                subtitle_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}", create_parent=True)
+                os.system(f"curl {shlex.quote(subtitle['url'])} -o {shlex.quote(subtitle_path)}")
             for subtitle in selected_subtitles:
                 if subtitle['format'] == 'vtt':
-                    convert_vtt_to_srt_custom(f"{Title}_{subtitle['language']}.{subtitle['format']}",f"{Title}_{subtitle['language']}.srt")
-                    os.system(f"rm {shlex.quote(f'{Title}_{subtitle['language']}.{subtitle['format']}')}")  
+                    source_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
+                    converted_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.srt", create_parent=True)
+                    convert_vtt_to_srt_custom(source_path, converted_path)
+                    os.system(f"rm {shlex.quote(source_path)}")  
                     subtitle['format'] = "srt"    
     
     
     
 
         print("Decrypting video file...")
-        os.system(f"./mp4decrypt {shlex.quote(f'Downloads/enc_{Title}.mp4')} {shlex.quote(f'{Title}.mp4')} --show-progress --key {key}")        
+        enc_video_path = get_encrypted_media_path(f"enc_{Title}", "mp4")
+        os.system(f"./mp4decrypt {shlex.quote(enc_video_path)} {shlex.quote(dec_video_path)} --show-progress --key {key}")        
 
         print("Decrypting audio file...")
         for audio in selected_audios:
             audio_locale = audio["audio_locale"]
-            input_path = f"Downloads/enc_{Title}_{audio_locale}.m4a"
-            output_path = f"{Title}_{audio_locale}.m4a"
+            input_path = get_encrypted_media_path(f"enc_{Title}_{audio_locale}", "m4a")
+            output_path = get_temp_path(Title, f"{Title}_{audio_locale}.m4a", create_parent=True)
             os.system(f"./mp4decrypt {shlex.quote(input_path)} {shlex.quote(output_path)} --show-progress --key {audio['key']}")
             print(f"Audio {audio_locale} decrypted successfully")
         print("All files decrypted successfully")
         print("Deleting Encoded files...")
-        os.system(f"rm -rf {shlex.quote(f'Downloads/enc_{Title}.mp4')}")
+        shutil.rmtree(get_temp_path(f"enc_{Title}"), ignore_errors=True)
         for audio in selected_audios:
-                input_path = f"Downloads/enc_{Title}_{audio_locale}.m4a"
-                os.system(f"rm -rf {input_path}")
+                shutil.rmtree(get_temp_path(f"enc_{Title}_{audio['audio_locale']}"), ignore_errors=True)
         print("temp  files deleted successfully")
         print("Merging video and audio files...")       
-    
 
-        ffmpeg_command = f"{ffmpeg_path} -nostdin -y -i {shlex.quote(Title+'.mp4')}"        
+
+        ffmpeg_command = f"{ffmpeg_path} -nostdin -y -i {shlex.quote(dec_video_path)}"        
 
         for audio in selected_audios:
-            audio_file = f"{Title}_{audio['audio_locale']}.m4a"
+            audio_file = get_temp_path(Title, f"{Title}_{audio['audio_locale']}.m4a")
             ffmpeg_command += f" -i {shlex.quote(audio_file)}"      
 
         if selected_subtitles:
             for subtitle in selected_subtitles:
-                subtitle_file = f"{Title}_{subtitle['language']}.{subtitle['format']}"
+                subtitle_file = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
                 ffmpeg_command += f" -i {shlex.quote(subtitle_file)}"       
     
 
@@ -621,9 +632,7 @@ else:
             for i in range(len(selected_audios) ,len(selected_audios) + len(selected_subtitles)):
                 ffmpeg_command += f" -map {i+1}:s?"  
         anime = re.sub(r'[<>:\"\'/\\|?*]', '', anime)    
-        if aka == 1:
-             os.makedirs(anime, exist_ok=True)
-        output_file = f"{anime}/{Title}.{video['height']}p.["
+        output_name = f"{Title}.{video['height']}p.["
         for i, audio in enumerate(selected_audios, start=1):
             lang = audio['audio_locale']
             lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang, lang) if lang else "und" 
@@ -632,12 +641,12 @@ else:
             else:
                ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="[{lang}]"'
             if i == 1:
-               output_file += f"{lang}"
+               output_name += f"{lang}"
             else:
-                output_file += f"+{lang}"       
+                output_name += f"+{lang}"       
 
         if selected_subtitles:
-            output_file += f" ({audio_codec}) ] [" if use_watermark else f" ["
+            output_name += f" ({audio_codec}) ] [" if use_watermark else f" ["
             for i, subtitle in enumerate(selected_subtitles, start=0):
                 lang = subtitle['language']
                 lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang, lang) if lang else "und"      
@@ -646,13 +655,14 @@ else:
                 else:
                     ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="[{lang}] [{subtitle["type"]}]"'
                 if i == 0:
-                   output_file += f"{lang} ({subtitle['format']})"
+                   output_name += f"{lang} ({subtitle['format']})"
                 else:
-                   output_file += f"+ {lang} ({subtitle['format']})"
+                   output_name += f"+ {lang} ({subtitle['format']})"
         else:
-            output_file += f" ({audio_codec})]" if use_watermark else f" ]"     
+            output_name += f" ({audio_codec})]" if use_watermark else f" ]"     
 
-        output_file += f"].{Watermark_Name}.{output_format}" if use_watermark else f"].{output_format}"     
+        output_name += f"].{Watermark_Name}.{output_format}" if use_watermark else f"].{output_format}"     
+        output_file = get_download_path(anime, output_name, create_parent=True)
 
         ffmpeg_command += f" -c:v {encoding_code} -c:a {audio_codec} -c:s copy {shlex.quote(output_file)}"      
 
@@ -661,14 +671,7 @@ else:
         print("Video and audio files merged successfully")
         print("Deleting temporary files...")
         print("Temporary files deleted successfully")
-        os.system(f"rm -rf '{Title}.mp4'")
-        for audio in selected_audios:
-            audio_file = f"{Title}_{audio['audio_locale']}.m4a"
-            os.system(f"rm -rf '{audio_file}'")
-        if selected_subtitles:
-            for subtitle in selected_subtitles:
-                subtitle_file = f"{Title}_{subtitle['language']}.{subtitle['format']}"
-                os.system(f"rm -rf '{subtitle_file}'")
+        shutil.rmtree(temp_title_dir, ignore_errors=True)
         if aka == 1:
            aka = 0
 
