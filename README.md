@@ -11,6 +11,7 @@
   <img src="https://img.shields.io/badge/FFmpeg-Required-007808?style=for-the-badge&logo=ffmpeg&logoColor=white" alt="FFmpeg" />
   <img src="https://img.shields.io/badge/Telegram-Bot-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram" />
   <img src="https://img.shields.io/badge/Docker-Supported-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker" />
+  <img src="https://img.shields.io/badge/OS-Linux%20%7C%20macOS%20%7C%20Windows-64748b?style=for-the-badge" alt="Supported operating systems" />
   <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="License" />
 </p>
 
@@ -140,6 +141,10 @@ On Linux or macOS, set the correct permissions:
 chmod +x mp4decrypt
 ```
 
+Use the binary built for your operating system. For a project-local binary, use
+`mp4decrypt.exe` on Windows, `mp4decrypt-macos` on macOS, or `mp4decrypt` on Linux.
+You can instead put `mp4decrypt` on `PATH`, which is checked first.
+
 ---
 
 ## Installation
@@ -151,11 +156,22 @@ git clone https://github.com/ToonTamilIndia/Crunchy-Bot-CLI.git
 cd Crunchy-Bot-CLI
 ```
 
-**Create and activate a virtual environment:**
+**Create a virtual environment:**
 
 ```bash
-python3 -m venv venv
+python -m venv venv
+```
+
+Activate it on Linux/macOS:
+
+```bash
 source venv/bin/activate
+```
+
+Or on Windows PowerShell:
+
+```powershell
+.\venv\Scripts\Activate.ps1
 ```
 
 **Install dependencies:**
@@ -163,6 +179,10 @@ source venv/bin/activate
 ```bash
 pip install -r requirements.txt
 ```
+
+Install FFmpeg and `mp4decrypt` for the host operating system and ensure both are
+on `PATH` (or configure `ffmpeg_path` and place the native `mp4decrypt` binary in
+the project directory). Shell commands are not required by the Python workflow.
 
 ---
 

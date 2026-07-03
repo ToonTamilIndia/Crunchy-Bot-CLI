@@ -1,9 +1,12 @@
 
 import re
 import os
-import shlex
 import shutil
 import sys
+import requests
+from platform_tools import (
+    display_command, quote_argument, resolve_executable, run_command, split_command,
+)
 from crunchyroll import (
     Crunchyroll, CrunchyrollAuth, CrunchyrollLicense,
     parse_mpd_content, get_segment_link_list, download_segment,
@@ -42,6 +45,30 @@ print("Hello Welcome to Crunchyroll Downloader")
 
 
 hard_subtitle = None
+
+
+def download_file(url, destination):
+    response = requests.get(url, timeout=60)
+    response.raise_for_status()
+    with open(destination, "wb") as output:
+        output.write(response.content)
+
+
+def decrypt_file(source, destination, key):
+    tool = resolve_executable("mp4decrypt")
+    command = [tool, source, destination, "--show-progress", "--key", key]
+    result = run_command(command)
+    if result.returncode != 0:
+        raise RuntimeError(f"mp4decrypt failed ({result.returncode}): {display_command(command)}")
+
+
+def run_ffmpeg(command):
+    if isinstance(command, str):
+        command = split_command(command)
+    print("ffmpeg command:", display_command(command))
+    result = run_command(command)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg failed with exit code {result.returncode}")
 
 
 def format_episode_row(index, episode):
@@ -266,13 +293,13 @@ if "watch" in video_url:
         print("Downloading subtitle file...")
         for subtitle in selected_subtitles:
             subtitle_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}", create_parent=True)
-            os.system(f"curl {shlex.quote(subtitle['url'])} -o {shlex.quote(subtitle_path)}")
+            download_file(subtitle['url'], subtitle_path)
         for subtitle in selected_subtitles:
             if subtitle['format'] == 'vtt':
                 source_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
                 converted_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.srt", create_parent=True)
                 convert_vtt_to_srt_custom(source_path, converted_path)
-                os.system(f"rm {shlex.quote(source_path)}")  
+                os.remove(source_path)
                 subtitle['format'] = "srt"
 
 
@@ -280,14 +307,14 @@ if "watch" in video_url:
 
     print("Decrypting video file...")
     enc_video_path = get_encrypted_media_path(f"enc_{Title}", "mp4")
-    os.system(f"./mp4decrypt {shlex.quote(enc_video_path)} {shlex.quote(dec_video_path)} --show-progress --key {key}")    
+    decrypt_file(enc_video_path, dec_video_path, key)
 
     print("Decrypting audio file...")
     for audio in selected_audios:
         audio_locale = audio["audio_locale"]
         input_path = get_encrypted_media_path(f"enc_{Title}_{audio_locale}", "m4a")
         output_path = get_temp_path(Title, f"{Title}_{audio_locale}.m4a", create_parent=True)
-        os.system(f"./mp4decrypt {shlex.quote(input_path)} {shlex.quote(output_path)} --show-progress --key {audio['key']}")
+        decrypt_file(input_path, output_path, audio['key'])
         print(f"Audio {audio_locale} decrypted successfully")
     print("All files decrypted successfully")
     print("Deleting Encoded files...")
@@ -298,16 +325,16 @@ if "watch" in video_url:
     print("Merging video and audio files...")   
 
 
-    ffmpeg_command = f"{ffmpeg_path} -nostdin -y -i {shlex.quote(dec_video_path)}"    
+    ffmpeg_command = f"{quote_argument(resolve_executable('ffmpeg', ffmpeg_path))} -nostdin -y -i {quote_argument(dec_video_path)}"
 
     for audio in selected_audios:
         audio_file = get_temp_path(Title, f"{Title}_{audio['audio_locale']}.m4a")
-        ffmpeg_command += f" -i {shlex.quote(audio_file)}"  
+        ffmpeg_command += f" -i {quote_argument(audio_file)}"
 
     if selected_subtitles:
         for subtitle in selected_subtitles:
             subtitle_file = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
-            ffmpeg_command += f" -i {shlex.quote(subtitle_file)}"   
+            ffmpeg_command += f" -i {quote_argument(subtitle_file)}"
 
 
     filter_complex = get_filter_complex()
@@ -355,10 +382,9 @@ if "watch" in video_url:
     output_name += f"].{Watermark_Name}.{output_format}" if use_watermark else f"].{output_format}" 
     output_file = get_download_path(output_name, create_parent=True)
 
-    ffmpeg_command += f" -c:v {encoding_code} -c:a {audio_codec} -c:s copy {shlex.quote(output_file)}"  
+    ffmpeg_command += f" -c:v {encoding_code} -c:a {audio_codec} -c:s copy {quote_argument(output_file)}"
 
-    print("ffmpeg command:", ffmpeg_command)
-    os.system(ffmpeg_command)
+    run_ffmpeg(ffmpeg_command)
     print("Video and audio files merged successfully")
     print("Deleting temporary files...")
     print("Temporary files deleted successfully")
@@ -575,13 +601,13 @@ else:
             print("Downloading subtitle file...")
             for subtitle in selected_subtitles:
                 subtitle_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}", create_parent=True)
-                os.system(f"curl {shlex.quote(subtitle['url'])} -o {shlex.quote(subtitle_path)}")
+                download_file(subtitle['url'], subtitle_path)
             for subtitle in selected_subtitles:
                 if subtitle['format'] == 'vtt':
                     source_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
                     converted_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.srt", create_parent=True)
                     convert_vtt_to_srt_custom(source_path, converted_path)
-                    os.system(f"rm {shlex.quote(source_path)}")  
+                    os.remove(source_path)
                     subtitle['format'] = "srt"    
     
     
@@ -589,14 +615,14 @@ else:
 
         print("Decrypting video file...")
         enc_video_path = get_encrypted_media_path(f"enc_{Title}", "mp4")
-        os.system(f"./mp4decrypt {shlex.quote(enc_video_path)} {shlex.quote(dec_video_path)} --show-progress --key {key}")        
+        decrypt_file(enc_video_path, dec_video_path, key)
 
         print("Decrypting audio file...")
         for audio in selected_audios:
             audio_locale = audio["audio_locale"]
             input_path = get_encrypted_media_path(f"enc_{Title}_{audio_locale}", "m4a")
             output_path = get_temp_path(Title, f"{Title}_{audio_locale}.m4a", create_parent=True)
-            os.system(f"./mp4decrypt {shlex.quote(input_path)} {shlex.quote(output_path)} --show-progress --key {audio['key']}")
+            decrypt_file(input_path, output_path, audio['key'])
             print(f"Audio {audio_locale} decrypted successfully")
         print("All files decrypted successfully")
         print("Deleting Encoded files...")
@@ -607,16 +633,16 @@ else:
         print("Merging video and audio files...")       
 
 
-        ffmpeg_command = f"{ffmpeg_path} -nostdin -y -i {shlex.quote(dec_video_path)}"        
+        ffmpeg_command = f"{quote_argument(resolve_executable('ffmpeg', ffmpeg_path))} -nostdin -y -i {quote_argument(dec_video_path)}"
 
         for audio in selected_audios:
             audio_file = get_temp_path(Title, f"{Title}_{audio['audio_locale']}.m4a")
-            ffmpeg_command += f" -i {shlex.quote(audio_file)}"      
+            ffmpeg_command += f" -i {quote_argument(audio_file)}"
 
         if selected_subtitles:
             for subtitle in selected_subtitles:
                 subtitle_file = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
-                ffmpeg_command += f" -i {shlex.quote(subtitle_file)}"       
+                ffmpeg_command += f" -i {quote_argument(subtitle_file)}"
     
 
         filter_complex = get_filter_complex()
@@ -664,10 +690,9 @@ else:
         output_name += f"].{Watermark_Name}.{output_format}" if use_watermark else f"].{output_format}"     
         output_file = get_download_path(anime, output_name, create_parent=True)
 
-        ffmpeg_command += f" -c:v {encoding_code} -c:a {audio_codec} -c:s copy {shlex.quote(output_file)}"      
+        ffmpeg_command += f" -c:v {encoding_code} -c:a {audio_codec} -c:s copy {quote_argument(output_file)}"
 
-        print("ffmpeg command:", ffmpeg_command)
-        os.system(ffmpeg_command)
+        run_ffmpeg(ffmpeg_command)
         print("Video and audio files merged successfully")
         print("Deleting temporary files...")
         print("Temporary files deleted successfully")
