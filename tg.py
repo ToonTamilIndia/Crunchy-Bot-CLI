@@ -1,6 +1,5 @@
 import re
 import os
-import shlex
 import traceback
 from functools import wraps
 from contextlib import suppress
@@ -9,6 +8,7 @@ import math
 from hachoir.metadata import extractMetadata
 from hachoir.parser import createParser
 import subprocess
+from platform_tools import display_command, resolve_executable, run_command, split_command
 
 from crunchyroll import (
     Crunchyroll, CrunchyrollAuth, CrunchyrollLicense,
@@ -235,14 +235,10 @@ def check_active_download(func):
     return wrapper
 
 def run_shell_command(command):
-    process = subprocess.Popen(
-        command,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-    stdout, stderr = process.communicate()
-    return stdout.decode(), stderr.decode(), process.returncode
+    if isinstance(command, str):
+        command = split_command(command)
+    result = run_command(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return result.stdout, result.stderr, result.returncode
 
 def edit_message(message: Message, text: str, keyboard: InlineKeyboardMarkup = None):
     with suppress(MessageNotModified, QueryIdInvalid):
@@ -1313,7 +1309,7 @@ def download_decrypt_merge_single(
                 sub_temp_path = os.path.join(temp_job_dir, f"{title}_{sub_lang}.{sub_format}")
                 sub_final_path = os.path.join(temp_job_dir, f"{title}_{sub_lang}.srt")
 
-                curl_cmd = f"curl -fsSL -o {shlex.quote(sub_temp_path)} {shlex.quote(sub_url)}"
+                curl_cmd = [resolve_executable("curl", project_fallback=False), "-fsSL", "-o", sub_temp_path, sub_url]
                 _, stderr, retcode = run_shell_command(curl_cmd)
                 if retcode != 0:
                     print(f"Subtitle download failed for {sub_lang}: {stderr}")
@@ -1335,7 +1331,7 @@ def download_decrypt_merge_single(
 
         edit_message(status_msg, f"{progress_prefix}Decrypting video...")
         enc_video_path = get_encrypted_media_path(f"enc_{title}", "mp4")
-        decrypt_cmd = f"./mp4decrypt {shlex.quote(enc_video_path)} {shlex.quote(dec_video_path)} --show-progress --key {video_key_str}"
+        decrypt_cmd = [resolve_executable("mp4decrypt"), enc_video_path, dec_video_path, "--show-progress", "--key", video_key_str]
         _, stderr, retcode = run_shell_command(decrypt_cmd)
         if retcode != 0:
             raise Exception(f"Video decryption failed: {stderr}")
@@ -1346,7 +1342,7 @@ def download_decrypt_merge_single(
             edit_message(status_msg, f"{progress_prefix}Decrypting audio {i+1}/{len(detailed_audios)} ({locale})...")
             enc_audio_path = get_encrypted_media_path(f"enc_{title}_{locale}", "m4a")
             dec_audio_path = os.path.join(temp_job_dir, f"{title}_{locale}.m4a")
-            decrypt_cmd = f"./mp4decrypt {shlex.quote(enc_audio_path)} {shlex.quote(dec_audio_path)} --show-progress --key {audio['key']}"
+            decrypt_cmd = [resolve_executable("mp4decrypt"), enc_audio_path, dec_audio_path, "--show-progress", "--key", audio['key']]
             _, stderr, retcode = run_shell_command(decrypt_cmd)
             if retcode != 0:
                 print(f"Warning: Audio decryption failed for {locale}: {stderr}. Skipping audio track.")
@@ -1359,7 +1355,7 @@ def download_decrypt_merge_single(
         edit_message(status_msg, f"{progress_prefix}Merging files...")
 
         ffmpeg_cmd_list = [
-            ffmpeg_path if ffmpeg_path else "ffmpeg",
+            resolve_executable("ffmpeg", ffmpeg_path),
             "-nostdin",
             "-y",
             "-i", dec_video_path
@@ -1436,9 +1432,9 @@ def download_decrypt_merge_single(
 
         edit_message(status_msg, f"{progress_prefix}Merging files... \n\n `{output_filename}` \n\n P.S: It takes few minutes to merge depending on the number of audio and subtitle selected.")
 
-        full_ffmpeg_command = shlex.join(ffmpeg_cmd_list)
+        full_ffmpeg_command = display_command(ffmpeg_cmd_list)
 
-        _, stderr, retcode = run_shell_command(full_ffmpeg_command)
+        _, stderr, retcode = run_shell_command(ffmpeg_cmd_list)
         if retcode != 0:
             error_log_path = f"{base_filename}_ffmpeg_error.log"
             with open(error_log_path, "w") as f:
