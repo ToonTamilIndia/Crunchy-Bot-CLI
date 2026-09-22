@@ -50,13 +50,34 @@ x_axis = "10" # x-axis position of the watermark
 y_axis = "(h-text_h)/2" # y-axis position of the watermark 
 
 
-#ffmpeg settings
-use_watermark = True # Set to True to use watermark
-ffmpeg_path = "ffmpeg" # Path to ffmpeg executable
-encoding_code = "libx264" # Encoding method note: if watermark is enabled, use "libx264" for encoding
-output_format = "mkv" # Output format
-audio_codec = "aac" # Audio codec
-original_quality = False # Set to True to use original quality (no encoding)
+# --- Video & Audio Encoding Settings ---
+# encoding_mode:
+#   "lossy"     - Re-encodes video in H.265 (HEVC) 10-bit for 40-60% smaller file size
+#                 with visually lossless quality, while copying original audio directly
+#                 (zero audio quality loss). Watermarking is fully supported.
+#   "lossless"  - Direct stream copy (remux) for both video and audio.
+#                 Bit-for-bit identical to Crunchyroll source, ultra-fast muxing, no re-encoding.
+#                 (Note: Watermarking is automatically disabled in lossless mode to avoid re-encoding).
+#   "custom"    - Use custom video codec (encoding_code), audio codec, and parameters defined below.
+# (Accepted aliases: "lossyy" -> "lossy", "losslessy" / "original" -> "lossless")
+encoding_mode = "lossy"
+
+# H.265 (HEVC) 10-bit & Video Parameters
+crf = 20                 # Constant Rate Factor (18-24 recommended; 20 gives great compression without visible loss)
+preset = "medium"         # Encoder speed preset: ultrafast, fast, medium, slow, slower (medium is recommended)
+pix_fmt = "yuv420p10le"   # 10-bit pixel format for H.265 (prevents color banding, improves compression efficiency)
+encoding_code = "libx265" # Video encoder ("libx265", "libx264", "copy")
+
+# Audio & Container Format
+audio_codec = "copy"      # "copy" preserves 100% original Crunchyroll audio quality without re-encoding
+output_format = "mkv"     # Output container format: "mkv" (recommended for multi-audio/subtitles) or "mp4"
+
+# Legacy compatibility
+original_quality = False  # If True, behaves as encoding_mode = "lossless"
+
+# FFmpeg Executable & Watermark Settings
+use_watermark = True      # Set to True to use watermark (supported in "lossy" & "custom" modes)
+ffmpeg_path = "ffmpeg"    # Path to ffmpeg executable
 
 
 
@@ -110,10 +131,8 @@ locale_map = {
     "uk-UA": "Ukrainian",
     "el-GR": "Greek",
     "he-IL": "Hebrew",
-    "th-TH": "Thai",
     "sw-KE": "Swahili",
     "af-ZA": "Afrikaans",
-    "ms-MY": "Malay",
     "bn-BD": "Bengali",
     "mr-IN": "Marathi",
     "gu-IN": "Gujarati",
