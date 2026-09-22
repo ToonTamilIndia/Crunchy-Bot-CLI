@@ -1377,14 +1377,186 @@ class CrunchyrollAuth(CrunchyrollBase):
         )
 
 def get_filter_complex():
-    
+    target_font = fontfile
+    if not os.path.isabs(target_font):
+        app_font = os.path.join(os.path.dirname(os.path.abspath(__file__)), fontfile)
+        if os.path.isfile(app_font):
+            target_font = app_font
+    if os.name == "nt":
+        target_font = target_font.replace("\\", "/").replace(":", "\\:")
+
     return (
         f"[0:v]drawtext=text='{Watermark_Name}':"
-        f"fontfile={fontfile}:"
+        f"fontfile={target_font}:"
         f"fontcolor={fontcolor}@{opaque}:" 
         f"fontsize={fontsize}:"
         f"x={x_axis}:"
         f"y={y_axis}[v]"
+    )
+
+
+class EncodingConfig:
+    def __init__(
+        self,
+        mode="lossy",
+        video_codec="libx265",
+        audio_codec="copy",
+        extra_video_args=None,
+        extra_audio_args=None,
+        use_watermark=False,
+        crf=20,
+        preset="medium",
+        pix_fmt="yuv420p10le",
+        output_format="mkv",
+    ):
+        self.mode = mode
+        self.video_codec = video_codec
+        self.audio_codec = audio_codec
+        self.extra_video_args = list(extra_video_args or [])
+        self.extra_audio_args = list(extra_audio_args or [])
+        self.use_watermark = use_watermark
+        self.crf = crf
+        self.preset = preset
+        self.pix_fmt = pix_fmt
+        self.output_format = output_format
+
+    def get_ffmpeg_args_list(self):
+        """Return list of FFmpeg arguments for encoding and muxing."""
+        args = ["-c:v", self.video_codec]
+        args.extend(self.extra_video_args)
+        args.extend(["-c:a", self.audio_codec])
+        args.extend(self.extra_audio_args)
+        args.extend(["-c:s", "copy"])
+        return args
+
+    def get_ffmpeg_args_str(self):
+        """Return FFmpeg argument string for CLI command concatenation."""
+        return " ".join(self.get_ffmpeg_args_list())
+
+    def summary(self):
+        """Return human-readable summary of encoding configuration."""
+        wm_text = "ON" if self.use_watermark else "OFF"
+        if self.mode == "lossless":
+            wm_note = " (auto-disabled for lossless stream copy)" if not self.use_watermark else ""
+            return f"Mode: LOSSLESS (remux/stream copy) | Video: copy | Audio: copy | Watermark: {wm_text}{wm_note}"
+        elif self.mode == "lossy":
+            return (
+                f"Mode: LOSSY (H.265 10-bit) | Video: {self.video_codec} (CRF {self.crf}, preset {self.preset}, {self.pix_fmt}) "
+                f"| Audio: {self.audio_codec} (lossless stream copy) | Watermark: {wm_text}"
+            )
+        else:
+            return f"Mode: CUSTOM | Video: {self.video_codec} | Audio: {self.audio_codec} | Watermark: {wm_text}"
+
+
+def resolve_encoding_config(
+    mode=None,
+    use_watermark=None,
+    original_quality=None,
+    encoding_code=None,
+    audio_codec=None,
+    crf=None,
+    preset=None,
+    pix_fmt=None,
+    output_format=None,
+):
+    """
+    Resolve video/audio encoding settings based on user-configured mode.
+
+    Modes:
+      - 'lossy' / 'lossyy' / 'h265': H.265 (HEVC) 10-bit video encoding (libx265, yuv420p10le,
+        CRF 20, preset medium) for 40-60% smaller file size with visually lossless quality,
+        combined with direct stream copy audio (zero audio quality loss). Watermarking supported.
+      - 'lossless' / 'losslessy' / 'original': Direct stream copy (remux) for both video and audio.
+        Bit-for-bit identical to source, ultra-fast. Watermarking is disabled to prevent re-encoding.
+      - 'custom': User-defined video and audio codecs and parameters.
+    """
+    import config
+
+    if mode is None:
+        mode = getattr(config, "encoding_mode", "lossy")
+    if original_quality is None:
+        original_quality = getattr(config, "original_quality", False)
+    if use_watermark is None:
+        use_watermark = getattr(config, "use_watermark", False)
+    if encoding_code is None:
+        encoding_code = getattr(config, "encoding_code", "libx265")
+    if audio_codec is None:
+        audio_codec = getattr(config, "audio_codec", "copy")
+    if crf is None:
+        crf = getattr(config, "crf", 20)
+    if preset is None:
+        preset = getattr(config, "preset", "medium")
+    if pix_fmt is None:
+        pix_fmt = getattr(config, "pix_fmt", "yuv420p10le")
+    if output_format is None:
+        output_format = getattr(config, "output_format", "mkv")
+
+    # Determine normalized mode
+    if original_quality:
+        norm_mode = "lossless"
+    else:
+        norm_mode = str(mode).strip().lower() if mode else "lossy"
+        if norm_mode in ("lossless", "losslessy", "original", "remux", "copy"):
+            norm_mode = "lossless"
+        elif norm_mode in ("lossy", "lossyy", "h265", "h265_10bit", "hevc", "compressed"):
+            norm_mode = "lossy"
+        elif norm_mode in ("custom", "manual"):
+            norm_mode = "custom"
+        else:
+            norm_mode = "lossy"
+
+    effective_watermark = bool(use_watermark)
+    extra_video_args = []
+    extra_audio_args = []
+
+    if norm_mode == "lossless":
+        video_codec = "copy"
+        audio_codec = "copy"
+        if effective_watermark:
+            print("[INFO] Lossless mode selected: direct stream copy is used, watermarking disabled to prevent re-encoding.")
+            effective_watermark = False
+
+    elif norm_mode == "lossy":
+        video_codec = "libx265"
+        # Preserve original audio without re-encoding to avoid generation loss
+        audio_codec = audio_codec or "copy"
+        crf_val = str(crf if crf is not None else 20)
+        preset_val = str(preset or "medium")
+        pix_fmt_val = str(pix_fmt or "yuv420p10le")
+        extra_video_args = ["-pix_fmt", pix_fmt_val, "-crf", crf_val, "-preset", preset_val]
+        if str(output_format).lower() == "mp4":
+            extra_video_args.extend(["-tag:v", "hvc1"])
+
+    else:  # custom
+        video_codec = str(encoding_code or "libx265")
+        audio_codec = str(audio_codec or "copy")
+        if video_codec == "copy":
+            if effective_watermark:
+                print("[INFO] Video codec is 'copy': watermarking disabled to prevent re-encoding.")
+                effective_watermark = False
+        elif video_codec == "libx265":
+            crf_val = str(crf if crf is not None else 20)
+            preset_val = str(preset or "medium")
+            pix_fmt_val = str(pix_fmt or "yuv420p10le")
+            extra_video_args = ["-pix_fmt", pix_fmt_val, "-crf", crf_val, "-preset", preset_val]
+            if str(output_format).lower() == "mp4":
+                extra_video_args.extend(["-tag:v", "hvc1"])
+        elif video_codec == "libx264":
+            crf_val = str(crf if crf is not None else 23)
+            preset_val = str(preset or "medium")
+            extra_video_args = ["-crf", crf_val, "-preset", preset_val]
+
+    return EncodingConfig(
+        mode=norm_mode,
+        video_codec=video_codec,
+        audio_codec=audio_codec,
+        extra_video_args=extra_video_args,
+        extra_audio_args=extra_audio_args,
+        use_watermark=effective_watermark,
+        crf=crf,
+        preset=preset,
+        pix_fmt=pix_fmt,
+        output_format=output_format,
     )
 
 class Crunchyroll(CrunchyrollBase):

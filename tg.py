@@ -16,7 +16,8 @@ from crunchyroll import (
     get_filter_complex, convert_vtt_to_srt_custom,
     get_episode_display_number, get_episode_title,
     parse_episode_selection, get_download_path,
-    get_encrypted_media_path, get_temp_path
+    get_encrypted_media_path, get_temp_path,
+    resolve_encoding_config, EncodingConfig,
 )
 from config import *
 
@@ -29,18 +30,8 @@ from pyrogram.errors import MessageNotModified, QueryIdInvalid
 
 try:
     auth = CrunchyrollAuth()
-    if use_watermark and original_quality:
-        print("WARNING: Original quality is set to True, but watermarking is enabled. Watermarking will be disabled.")
-        use_watermark = False
-    if use_watermark:
-        encoding_code = "libx264"
-        original_quality = False
-        audio_codec = "aac"
-    if original_quality:
-        encoding_code = "copy"
-        audio_codec = "copy"
-        use_watermark = False
-
+    encoding_config = resolve_encoding_config()
+    print(f"[Telegram Bot] {encoding_config.summary()}")
 except Exception as e:
     print(f"ERROR : {e}")
     exit(1)
@@ -1367,10 +1358,11 @@ def download_decrypt_merge_single(
         for sub in subtitle_files:
             ffmpeg_cmd_list.extend(["-i", sub['path']])
 
+        encoding_cfg = resolve_encoding_config()
         map_commands = []
         metadata_commands = []
         watermark_name = globals().get("Watermark_Name", "")
-        if use_watermark:
+        if encoding_cfg.use_watermark:
             filter_complex = get_filter_complex()
             ffmpeg_cmd_list.extend(["-filter_complex", filter_complex])
             map_commands.extend(["-map", "[v]"])
@@ -1384,7 +1376,7 @@ def download_decrypt_merge_single(
             lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(audio['title_lang'], audio['title_lang']) if audio['title_lang'] else "und"
             title_lang = audio['title_lang']
             output_audio_langs.append(title_lang)
-            if use_watermark:
+            if encoding_cfg.use_watermark:
                 metadata_commands.extend([
                     f"-metadata:s:a:{i}", f"language={lang_code}",
                     f"-metadata:s:a:{i}", f'title={watermark_name} - [{title_lang}]'
@@ -1403,7 +1395,7 @@ def download_decrypt_merge_single(
             title_lang = sub['title_lang']
             sub_type = sub['type']
             output_sub_langs.append(f"{title_lang} ({os.path.splitext(sub['path'])[1][1:]})")
-            if use_watermark:
+            if encoding_cfg.use_watermark:
                 metadata_commands.extend([
                     f"-metadata:s:s:{i}", f"language={lang_code}",
                     f"-metadata:s:s:{i}", f'title={watermark_name} - [{title_lang}] [{sub_type}]'
@@ -1417,18 +1409,14 @@ def download_decrypt_merge_single(
         quality_str = f"{video_quality_info['height']}p"
         audio_str = "+".join(output_audio_langs) if output_audio_langs else "NoAudio"
         sub_str = "+".join(output_sub_langs) if output_sub_langs else "NoSubs"
-        watermark_suffix = f".{watermark_name}" if use_watermark else ""
+        watermark_suffix = f".{watermark_name}" if encoding_cfg.use_watermark else ""
 
         output_filename = f"{base_filename}.{quality_str}.[{audio_str}].[{sub_str}]{watermark_suffix}.{output_format}"
 
         ffmpeg_cmd_list.extend(map_commands)
         ffmpeg_cmd_list.extend(metadata_commands)
-        ffmpeg_cmd_list.extend([
-            "-c:v", encoding_code,
-            "-c:a", audio_codec,
-            "-c:s", "copy",
-            output_filename
-        ])
+        ffmpeg_cmd_list.extend(encoding_cfg.get_ffmpeg_args_list())
+        ffmpeg_cmd_list.append(output_filename)
 
         edit_message(status_msg, f"{progress_prefix}Merging files... \n\n `{output_filename}` \n\n P.S: It takes few minutes to merge depending on the number of audio and subtitle selected.")
 

@@ -215,9 +215,13 @@ DEBUG            = False
 | `API_HASH` | Telegram API hash from my.telegram.org |
 | `sudo_users` | List of Telegram user IDs with admin access |
 | `premium_users` | List of Telegram user IDs with premium access |
-| `DEFAULT_QUALITY` | Default video quality for downloads |
-| `ENABLE_WATERMARK` | Enable or disable watermarking on output files |
-| `DEBUG` | Enable verbose debug logging |
+| `encoding_mode` | Encoding mode: `"lossy"` (H.265 10-bit), `"lossless"` (remux/stream copy), or `"custom"` |
+| `crf` | Constant Rate Factor for H.265 (default `20` for low file size without visual quality loss) |
+| `preset` | Encoder preset (default `"medium"`, balances speed and file size) |
+| `pix_fmt` | Pixel format (default `"yuv420p10le"` 10-bit, prevents anime color banding) |
+| `audio_codec` | Audio codec (`"copy"` preserves 100% original audio quality, or `"aac"`) |
+| `use_watermark` | Enable or disable watermarking on output files |
+| `debug` | Enable verbose debug logging |
 
 ---
 
@@ -231,6 +235,12 @@ DEBUG            = False
 source venv/bin/activate
 python3 cli.py
 ```
+
+**Optional CLI Flags:**
+- `--lossy` / `--lossyy` : Encode video in H.265 10-bit for 40-60% smaller file size with untouched audio quality.
+- `--lossless` / `--losslessy` : Direct stream copy (remux) for bit-for-bit source quality with ultra-fast merge.
+- `--mode=<mode>` : Explicit encoding mode (`lossy`, `lossless`, or `custom`).
+- `--debug` : Show safe auth/playback endpoint status details.
 
 ### Download Workflow
 

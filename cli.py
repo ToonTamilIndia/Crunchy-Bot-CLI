@@ -14,16 +14,20 @@ from crunchyroll import (
     get_episode_display_number, get_episode_season_title,
     get_episode_title, parse_episode_selection, set_cr_debug,
     get_download_path, get_encrypted_media_path, get_temp_path,
+    resolve_encoding_config, EncodingConfig,
 )
 from config import *
 
 
-HELP_TEXT = """Usage: python cli.py [--debug]
+HELP_TEXT = """Usage: python cli.py [--debug] [--lossy | --lossless | --mode=<mode>]
 
 Interactive Crunchyroll downloader.
 
 Options:
-  --debug    Show safe auth/playback endpoint status details.
+  --debug       Show safe auth/playback endpoint status details.
+  --lossy       Encode video in H.265 10-bit for small file size (default).
+  --lossless    Direct stream copy (remux) for bit-for-bit source quality.
+  --mode=<mode> Explicit encoding mode: lossy, lossless, custom.
 
 Inputs:
   URL or title search: one piece
@@ -41,7 +45,19 @@ if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
 CLI_DEBUG = any(arg == "--debug" for arg in sys.argv[1:]) or bool(debug)
 set_cr_debug(CLI_DEBUG)
 
+cli_mode = None
+for arg in sys.argv[1:]:
+    if arg in ("--lossy", "--lossyy", "--h265"):
+        cli_mode = "lossy"
+    elif arg in ("--lossless", "--losslessy", "--original"):
+        cli_mode = "lossless"
+    elif arg.startswith("--mode="):
+        cli_mode = arg.split("=", 1)[1]
+
+encoding_config = resolve_encoding_config(mode=cli_mode)
+
 print("Hello Welcome to Crunchyroll Downloader")
+print(f"[{encoding_config.summary()}]")
 
 
 hard_subtitle = None
@@ -337,8 +353,8 @@ if "watch" in video_url:
             ffmpeg_command += f" -i {quote_argument(subtitle_file)}"
 
 
-    filter_complex = get_filter_complex()
-    if use_watermark:
+    if encoding_config.use_watermark:
+        filter_complex = get_filter_complex()
         ffmpeg_command += f' -filter_complex "{filter_complex}"'
         ffmpeg_command += ' -map "[v]"'
     else:
@@ -354,7 +370,7 @@ if "watch" in video_url:
     for i, audio in enumerate(selected_audios, start=1):
         lang = audio['audio_locale']
         lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang,lang)
-        if use_watermark:
+        if encoding_config.use_watermark:
            ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="{Watermark_Name} - [{lang}]"'
         else:
            ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="[{lang}]"'
@@ -363,12 +379,13 @@ if "watch" in video_url:
         else:
             output_name += f"+{lang}"   
 
+    audio_label = "AAC" if encoding_config.audio_codec.lower() == "copy" else encoding_config.audio_codec.upper()
     if selected_subtitles:
-        output_name += f" ({audio_codec}) ] [" if use_watermark else f" ["
+        output_name += f" ({audio_label}) ] [" if encoding_config.use_watermark else f" ["
         for i, subtitle in enumerate(selected_subtitles, start=0):
             lang = subtitle['language']
             lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang,lang)
-            if use_watermark:
+            if encoding_config.use_watermark:
                ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="{Watermark_Name} - [{lang}] [{subtitle["type"]}]"'
             else:
                 ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="[{lang}] [{subtitle["type"]}]"'
@@ -377,12 +394,12 @@ if "watch" in video_url:
             else:
                output_name += f"+ {lang} ({subtitle['format']})"
     else:
-        output_name += f" ({audio_codec})]" if use_watermark else f" ]" 
+        output_name += f" ({audio_label})]" if encoding_config.use_watermark else f" ]" 
 
-    output_name += f"].{Watermark_Name}.{output_format}" if use_watermark else f"].{output_format}" 
+    output_name += f"].{Watermark_Name}.{output_format}" if encoding_config.use_watermark else f"].{output_format}" 
     output_file = get_download_path(output_name, create_parent=True)
 
-    ffmpeg_command += f" -c:v {encoding_code} -c:a {audio_codec} -c:s copy {quote_argument(output_file)}"
+    ffmpeg_command += f" {encoding_config.get_ffmpeg_args_str()} {quote_argument(output_file)}"
 
     run_ffmpeg(ffmpeg_command)
     print("Video and audio files merged successfully")
@@ -644,9 +661,10 @@ else:
                 subtitle_file = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
                 ffmpeg_command += f" -i {quote_argument(subtitle_file)}"
     
+    
 
-        filter_complex = get_filter_complex()
-        if use_watermark:
+        if encoding_config.use_watermark:
+            filter_complex = get_filter_complex()
             ffmpeg_command += f' -filter_complex "{filter_complex}"'
             ffmpeg_command += ' -map "[v]"'
         else:
@@ -662,7 +680,7 @@ else:
         for i, audio in enumerate(selected_audios, start=1):
             lang = audio['audio_locale']
             lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang, lang) if lang else "und" 
-            if use_watermark:
+            if encoding_config.use_watermark:
                ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="{Watermark_Name} - [{lang}]"'
             else:
                ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="[{lang}]"'
@@ -671,12 +689,13 @@ else:
             else:
                 output_name += f"+{lang}"       
 
+        audio_label = "AAC" if encoding_config.audio_codec.lower() == "copy" else encoding_config.audio_codec.upper()
         if selected_subtitles:
-            output_name += f" ({audio_codec}) ] [" if use_watermark else f" ["
+            output_name += f" ({audio_label}) ] [" if encoding_config.use_watermark else f" ["
             for i, subtitle in enumerate(selected_subtitles, start=0):
                 lang = subtitle['language']
                 lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang, lang) if lang else "und"      
-                if use_watermark:
+                if encoding_config.use_watermark:
                    ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="{Watermark_Name} - [{lang}] [{subtitle["type"]}]"'
                 else:
                     ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="[{lang}] [{subtitle["type"]}]"'
@@ -685,12 +704,12 @@ else:
                 else:
                    output_name += f"+ {lang} ({subtitle['format']})"
         else:
-            output_name += f" ({audio_codec})]" if use_watermark else f" ]"     
+            output_name += f" ({audio_label})]" if encoding_config.use_watermark else f" ]"     
 
-        output_name += f"].{Watermark_Name}.{output_format}" if use_watermark else f"].{output_format}"     
+        output_name += f"].{Watermark_Name}.{output_format}" if encoding_config.use_watermark else f"].{output_format}"     
         output_file = get_download_path(anime, output_name, create_parent=True)
 
-        ffmpeg_command += f" -c:v {encoding_code} -c:a {audio_codec} -c:s copy {quote_argument(output_file)}"
+        ffmpeg_command += f" {encoding_config.get_ffmpeg_args_str()} {quote_argument(output_file)}"
 
         run_ffmpeg(ffmpeg_command)
         print("Video and audio files merged successfully")
