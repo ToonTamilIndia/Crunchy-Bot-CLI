@@ -109,10 +109,13 @@ class TestKidDoesNotBorrowFromSiblings(unittest.TestCase):
         self.assertNotIn("kid", clear)
 
     def test_audio_sibling_cannot_leak_its_kid_into_a_clear_video_track(self):
-        doc = (f'<MPD xmlns="{NS}" xmlns:cenc="{CENC}"><Period><AdaptationSet '
-               f'mimeType="video/mp4">'
+        """Real manifests put audio in an audio AdaptationSet; a protected
+        audio track must not lend its key to a clear video track."""
+        doc = (f'<MPD xmlns="{NS}" xmlns:cenc="{CENC}"><Period>'
+               f'<AdaptationSet mimeType="video/mp4">'
                f'<Representation id="v" width="640" height="360" bandwidth="1">'
-               f'<BaseURL>u</BaseURL></Representation>'
+               f'<BaseURL>u</BaseURL></Representation></AdaptationSet>'
+               f'<AdaptationSet mimeType="audio/mp4">'
                f'<Representation id="a" bandwidth="1">'
                f'<ContentProtection cenc:default_KID="{OTHER_KID}"/><BaseURL>a</BaseURL>'
                f'</Representation></AdaptationSet></Period></MPD>').encode()

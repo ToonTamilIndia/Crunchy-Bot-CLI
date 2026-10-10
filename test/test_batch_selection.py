@@ -90,8 +90,20 @@ class TestBatchQualityResolution(unittest.TestCase):
             {"height": 1080, "bandwidth": 8887030},
         ]
 
-    def test_index_within_range_is_honoured(self):
-        self.assertEqual(resolve_video_quality(self.video_list, 1, 1080)["height"], 480)
+    def test_requested_height_wins_over_a_stale_index(self):
+        """A batch run's index refers to the list it was typed against.
+
+        Honouring it on a later episode whose list differs downloaded whatever
+        happened to sit there (asking 720p returned 480p), so the stable height
+        is what wins.
+        """
+        self.assertEqual(resolve_video_quality(self.video_list, 1, 1080)["height"], 1080)
+
+    def test_height_is_honoured_when_the_index_is_out_of_range(self):
+        self.assertEqual(resolve_video_quality(self.video_list, 9, 1080)["height"], 1080)
+
+    def test_index_is_used_when_no_height_was_requested(self):
+        self.assertEqual(resolve_video_quality(self.video_list, 1, None)["height"], 480)
 
     def test_short_episode_falls_back_to_nearest_height(self):
         """An episode with fewer renditions must not IndexError."""

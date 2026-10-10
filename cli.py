@@ -242,6 +242,10 @@ if "watch" in video_url:
         print(f"[ERROR] {exc}")
         exit()
 
+    # Only fully resolved audio records (key + segments) reach downstream
+    # stages; a license failure used to leave the entry in place and the later
+    # download step then raised KeyError on the missing 'segment'.
+    resolved_audios = []
     for audio in selected_audios:
         info = crunchyroll.get_video_info(audio['guid'])
         pssh, mpd_content, token = crunchyroll.get_pssh(info)
@@ -257,11 +261,17 @@ if "watch" in video_url:
             print(f"[WARN] Skipping audio track: {exc}")
             continue
         if highest_audio:
-            audseg = get_segment_link_list(mpd_content, highest_audio['name'], highest_audio['base_url'])
+            audseg = get_segment_link_list(mpd_content, highest_audio['name'], highest_audio['base_url'], document_url=crunchyroll.mpd_document_url)
+            if not audseg or 'all' not in audseg:
+                print(f"[WARN] No audio segments for {audio.get('audio_locale')}; skipping.")
+                continue
             audio['segment'] = audseg
         else:
             print("No audio found")
-            exit()  
+            continue
+        resolved_audios.append(audio)
+
+    selected_audios = [a for a in resolved_audios if a.get('key') and a.get('segment')]
 
 
     if ('captions' in video_info and video_info['captions']) or ('subtitles' in video_info and video_info['subtitles']):
@@ -328,7 +338,7 @@ if "watch" in video_url:
         selected_subtitles = False  
 
 
-    vidseg = get_segment_link_list(mpd__content, video['name'], video['base_url'])
+    vidseg = get_segment_link_list(mpd__content, video['name'], video['base_url'], document_url=crunchyroll.mpd_document_url)
     if not vidseg or "all" not in vidseg:
         print("Failed to resolve video segments for this episode.")
         exit()
@@ -593,13 +603,18 @@ else:
                 print(f"[WARN] Skipping audio track: {exc}")
                 continue
             if highest_audio:
-                audseg = get_segment_link_list(mpd_content, highest_audio['name'], highest_audio['base_url'])
+                audseg = get_segment_link_list(mpd_content, highest_audio['name'], highest_audio['base_url'], document_url=crunchyroll.mpd_document_url)
+                if not audseg or 'all' not in audseg:
+                    print(f"[WARN] No audio segments for {audio.get('audio_locale')}; skipping.")
+                    continue
                 audio['segment'] = audseg
             else:
                 print("No audio found")
-                exit()      
-    
-    
+                continue
+
+        # Batch keeps only resolved tracks; an unresolved entry would raise
+        # KeyError further down when the download step reads ['segment'].
+        selected_audios = [a for a in selected_audios if a.get('key') and a.get('segment')]
 
         if ('captions' in video_info and video_info['captions']) or ('subtitles' in video_info and video_info['subtitles']):
             available_tracks = []
@@ -662,7 +677,7 @@ else:
     
     
 
-        vidseg = get_segment_link_list(mpd__content, video['name'], video['base_url'])
+        vidseg = get_segment_link_list(mpd__content, video['name'], video['base_url'], document_url=crunchyroll.mpd_document_url)
         if not vidseg or "all" not in vidseg:
             print("Failed to resolve video segments for this episode.")
             exit()

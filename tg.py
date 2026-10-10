@@ -1192,7 +1192,7 @@ def process_download(client, user_id):
                     edit_message(status_msg, f"{ep_num_str}: Failed to get video license key. Skipping.")
                     continue
 
-                vidseg = get_segment_link_list(mpd_content, selected_video_quality['name'], selected_video_quality['base_url'])
+                vidseg = get_segment_link_list(mpd_content, selected_video_quality['name'], selected_video_quality['base_url'], document_url=crunchyroll.mpd_document_url)
                 if not vidseg or "all" not in vidseg:
                     edit_message(status_msg, f"{ep_num_str}: Failed to get video segments. Skipping.")
                     continue
@@ -1230,7 +1230,7 @@ def process_download(client, user_id):
                     if not audio_keys:
                         continue
 
-                    audseg = get_segment_link_list(audio_mpd, highest_audio['name'], highest_audio['base_url'])
+                    audseg = get_segment_link_list(audio_mpd, highest_audio['name'], highest_audio['base_url'], document_url=crunchyroll.mpd_document_url)
                     if not audseg or "all" not in audseg:
                         continue
 
@@ -1352,7 +1352,7 @@ def process_download(client, user_id):
             if not video_key_str:
                 raise Exception("Failed to get video license key.")
 
-            vidseg = get_segment_link_list(mpd_content, selected_video_quality['name'], selected_video_quality['base_url'])
+            vidseg = get_segment_link_list(mpd_content, selected_video_quality['name'], selected_video_quality['base_url'], document_url=crunchyroll.mpd_document_url)
             if not vidseg or "all" not in vidseg:
                 raise Exception("Failed to get video segments.")
 
@@ -1382,7 +1382,7 @@ def process_download(client, user_id):
                     print(f"Warning: Failed to get audio license key for {locale_name}. Skipping audio track.")
                     continue
 
-                audseg = get_segment_link_list(audio_mpd, highest_audio['name'], highest_audio['base_url'])
+                audseg = get_segment_link_list(audio_mpd, highest_audio['name'], highest_audio['base_url'], document_url=crunchyroll.mpd_document_url)
                 if not audseg or "all" not in audseg:
                     continue
 

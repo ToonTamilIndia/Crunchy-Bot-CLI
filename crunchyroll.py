@@ -699,12 +699,25 @@ def resolve_batch_audios(selected_locales, versions, locale_map=None):
 
 
 def resolve_video_quality(video_list, chosen_index, chosen_height):
-    """Return the requested rendition, or the closest height if it is absent."""
+    """Return the requested rendition, preferring the stable height.
+
+    A batch run stores the height the user picked, but chosen_index only refers
+    to the rendition list it was typed against. On a later episode whose list
+    differs, honouring the index silently downloaded whatever now sat there
+    (asking for 720p returned 480p). Height is stable across episodes, so it
+    wins; the index is only a fallback for the interactive single-title path.
+    """
     if not video_list:
         return None
+    if chosen_height:
+        exact = [item for item in video_list if item.get("height") == chosen_height]
+        if exact:
+            return exact[0]
     if isinstance(chosen_index, int) and 0 <= chosen_index < len(video_list):
         return video_list[chosen_index]
-    return min(video_list, key=lambda item: abs(item.get("height", 0) - chosen_height))
+    if chosen_height:
+        return min(video_list, key=lambda item: abs(item.get("height", 0) - chosen_height))
+    return video_list[0]
 
 
 def dedup_preserving_order(values):
@@ -1072,8 +1085,19 @@ def parse_mpd_content(mpd_content):
         bandwidth = int(elem.attrib.get('bandwidth', 0))
         codecs = elem.attrib.get('codecs', '')
 
+        # width/height may be declared on the AdaptationSet and inherited, so
+        # read the effective value. Otherwise a video Representation lands in
+        # audio_list purely because its own element lacks the attributes.
         width = elem.attrib.get('width')
         height = elem.attrib.get('height')
+        if not width or not height:
+            ancestor = elem.getparent()
+            while ancestor is not None and (not width or not height):
+                if not width:
+                    width = ancestor.attrib.get('width')
+                if not height:
+                    height = ancestor.attrib.get('height')
+                ancestor = ancestor.getparent()
         width = int(width) if width else None
         height = int(height) if height else None
 
@@ -1094,7 +1118,22 @@ def parse_mpd_content(mpd_content):
         if kid:
             entry["kid"] = kid
 
-        if width and height:
+        # Classify on effective dimensions first, then fall back to the declared
+        # content type so a video track is never filed as audio.
+        is_video = bool(width and height)
+        if not is_video:
+            adaptation = elem.getparent()
+            mime = ""
+            for node in (elem, adaptation):
+                if node is not None and node.attrib.get('mimeType'):
+                    mime = node.attrib['mimeType']
+                    break
+            content_type = elem.attrib.get('contentType', "") or ""
+            codecs = str(elem.attrib.get('codecs', "") or "").lower()
+            is_video = (mime.startswith("video") or content_type == "video"
+                        or codecs.startswith(("avc", "hev", "hvc", "vp0", "vp8", "vp9", "av01", "av1")))
+
+        if is_video:
             video_list.append(entry)
         else:
             audio_list.append(entry)
@@ -1280,7 +1319,8 @@ def get_mpd_total_ticks(tree, period, segment_template):
     return int(seconds * timescale)
 
 
-def get_segment_link_list(mpd_content, representation_id, url=""):
+def get_segment_link_list(mpd_content, representation_id, url="", period_id=None,
+                          document_url=None):
     """Resolve the downloadable segment URLs for one DASH representation.
 
     Crunchyroll does not always ship the same addressing mode, so all of the
@@ -1304,9 +1344,27 @@ def get_segment_link_list(mpd_content, representation_id, url=""):
     ns = {'dash': 'urn:mpeg:dash:schema:mpd:2011'}
 
     try:
-        representation = tree.find(f'.//dash:Representation[@id="{representation_id}"]', ns)
-        if representation is None:
+        # Ids are only unique within a Period. When several Periods reuse one,
+        # resolving by id alone silently picks the first and downloads the wrong
+        # rendition, so prefer a Period the caller identified.
+        matches = tree.findall(f'.//dash:Representation[@id="{representation_id}"]', ns)
+        if not matches:
             return {}
+        representation = matches[0]
+        if len(matches) > 1 and period_id:
+            for candidate in matches:
+                node = candidate
+                while node is not None:
+                    if node.tag == f'{{{ns["dash"]}}}Period' and node.get('id') == period_id:
+                        representation = candidate
+                        break
+                    node = node.getparent()
+                else:
+                    continue
+                break
+        elif len(matches) > 1:
+            print(f"[WARN] Representation id '{representation_id}' appears in "
+                  f"{len(matches)} periods; using the first. Pass period_id to disambiguate.")
 
         adaptation_set = representation.getparent()
         period = representation
@@ -1316,12 +1374,49 @@ def get_segment_link_list(mpd_content, representation_id, url=""):
         def find_first(tag):
             return find_inherited(representation, tag, ns)
 
+        def merged_inherited(tag):
+            """Element of `tag` with attributes merged across DASH inheritance.
+
+            A SegmentTemplate may declare media/init on the AdaptationSet and
+            only timeline/startNumber on the Representation. find_inherited()
+            returns the nearest declaration, which silently dropped the parent's
+            media and init and resolved to nothing, so merge attribute by
+            attribute with the nearest declaration winning.
+            """
+            tag_q = f'{{{ns["dash"]}}}{tag}'
+            levels, current = [], representation
+            while current is not None:
+                # A declaration may be the node itself (rare) or one of its children.
+                declared = current if current.tag == tag_q else current.find(f'dash:{tag}', ns)
+                if declared is not None:
+                    levels.insert(0, declared)
+                if current.tag == f'{{{ns["dash"]}}}MPD':
+                    break
+                current = current.getparent()
+            if not levels:
+                return None
+            merged = etree.Element(tag_q)
+            timeline = None
+            for level in levels:
+                for name, value in level.attrib.items():
+                    merged.set(name, value)
+                found_timeline = level.find('dash:SegmentTimeline', ns)
+                if found_timeline is not None:
+                    timeline = found_timeline
+            merged.set('media', levels[-1].get('media', merged.get('media', '')))
+            if timeline is not None:
+                merged.append(timeline)
+            return merged if (merged.get('media') or merged.get('initialization')) else None
+
         base = (url or "").strip()
         if not base:
             base = get_mpd_base_url(representation) or ""
 
         def absolute(path):
-            return urljoin(base, path) if base else path
+            resolved = urljoin(base, path) if base else path
+            if document_url and not resolved.startswith(("http://", "https://")):
+                resolved = urljoin(document_url, resolved)
+            return resolved
 
         bandwidth = representation.get('bandwidth', '')
 
@@ -1372,7 +1467,9 @@ def get_segment_link_list(mpd_content, representation_id, url=""):
                 "all": ([init_url] if init_url else []) + segments,
             }
 
-        segment_template = find_first('SegmentTemplate')
+        segment_template = merged_inherited('SegmentTemplate')
+        if segment_template is None:
+            segment_template = find_first('SegmentTemplate')
         if segment_template is None:
             return {}
 
@@ -1390,7 +1487,8 @@ def get_segment_link_list(mpd_content, representation_id, url=""):
         if segment_timeline is not None:
             total_ticks = get_mpd_total_ticks(tree, period, segment_template)
             current_time = 0
-            for segment in segment_timeline.findall('dash:S', ns):
+            timeline_entries = segment_timeline.findall('dash:S', ns)
+            for entry_index, segment in enumerate(timeline_entries):
                 t_attr = segment.get('t')
                 if t_attr is not None:
                     current_time = int(t_attr)
@@ -1406,10 +1504,22 @@ def get_segment_link_list(mpd_content, representation_id, url=""):
                         # r="-1" means "repeat until the end of the Period". It has
                         # to be derived from the period length; treating it as
                         # r+1 yields zero repeats and truncates the episode.
-                        if duration <= 0 or total_ticks <= 0:
+                        # r="-1" repeats up to the *next* S entry's start
+                        # time; the Period length is only the fallback when
+                        # this is the last entry. Bounding by the Period here
+                        # generated every segment up to the end of the show.
+                        bound = None
+                        for later in timeline_entries[entry_index + 1:]:
+                            later_t = later.get('t')
+                            if later_t is not None:
+                                bound = int(later_t)
+                                break
+                        if bound is None:
+                            bound = total_ticks
+                        if duration <= 0 or bound <= current_time:
                             repeat_count = 0
                         else:
-                            remaining = max(0, total_ticks - current_time)
+                            remaining = bound - current_time
                             repeat_count = -(-remaining // duration)
                     else:
                         repeat_count += 1
@@ -1637,12 +1747,30 @@ class CrunchyrollAuth(CrunchyrollBase):
         except Exception:
             return {}
 
-    def _write_etp_rt_cache(self, payload, etp_rt, device_id):
+    @staticmethod
+    def _normalize_account(value):
+        return str(value or "").strip().lower()
+
+    def _cache_matches_account(self, payload, email):
+        """Only reuse a cached token for the account it was issued to."""
+        if not email:
+            return True
+        cached = self._normalize_account((payload or {}).get("account"))
+        if not cached:
+            return False
+        return cached == self._normalize_account(email)
+
+    def _write_etp_rt_cache(self, payload, etp_rt, device_id, account=None):
         if not payload:
             return
         token_payload = dict(payload)
         token_payload["device_id"] = device_id
         token_payload["etp_rt"] = etp_rt
+        # Default to the account currently logging in so every writer stamps it,
+        # including the etp_rt/refresh paths that have no account argument.
+        account = account or getattr(self, "last_login_account", None)
+        if account:
+            token_payload["account"] = self._normalize_account(account)
         if token_payload.get("expires_in"):
             token_payload["expires_at"] = int(time.time()) + int(token_payload["expires_in"])
         try:
@@ -1720,11 +1848,13 @@ class CrunchyrollAuth(CrunchyrollBase):
         except Exception:
             return {}
 
-    def _write_cached_token(self, profile, payload, device_id):
+    def _write_cached_token(self, profile, payload, device_id, account=None):
         if not isinstance(payload, dict):
             return
         token_payload = dict(payload)
         token_payload["device_id"] = device_id
+        if account:
+            token_payload["account"] = self._normalize_account(account)
         if token_payload.get("expires_in"):
             token_payload["expires_at"] = int(time.time()) + int(token_payload["expires_in"])
         try:
@@ -1890,7 +2020,7 @@ class CrunchyrollAuth(CrunchyrollBase):
         }
         payload = self._post_profile_token_payload(profile, data, f"{profile['name']} password")
         if payload:
-            self._write_cached_token(profile, payload, device_id)
+            self._write_cached_token(profile, payload, device_id, account=email)
         return payload
 
     @staticmethod
@@ -2093,13 +2223,18 @@ class CrunchyrollAuth(CrunchyrollBase):
             return None
 
         self.last_token_payload = payload
-        self._write_etp_rt_cache(payload, etp_rt, str(payload.get("device_id") or uuid.uuid4()))
+        self._write_etp_rt_cache(payload, etp_rt,
+                                 str(payload.get("device_id") or uuid.uuid4()),
+                                 account=self.last_login_account)
         return payload.get("access_token")
 
     def get_password_token(self, email, password, force_refresh=False):
+        if email:
+            self.last_login_account = self._normalize_account(email)
         if not force_refresh:
             cached = self._read_etp_rt_cache()
-            if self._has_valid_access_token(cached):
+            # A cache written for another account must never satisfy this login.
+            if self._has_valid_access_token(cached) and self._cache_matches_account(cached, email):
                 self.playback_endpoint = "web/chrome"
                 self.playback_user_agent = CR_ETP_USER_AGENT
                 self.last_token_payload = cached
@@ -2114,7 +2249,8 @@ class CrunchyrollAuth(CrunchyrollBase):
         auth_profiles = self._profiles_with_crd_updates()
         for profile in auth_profiles:
             cached_payload = self._read_cached_token(profile)
-            if not force_refresh and self._has_valid_access_token(cached_payload):
+            if (not force_refresh and self._has_valid_access_token(cached_payload)
+                    and self._cache_matches_account(cached_payload, email)):
                 self.playback_endpoint = profile["endpoint"]
                 self.playback_user_agent = profile["user_agent"]
                 self.last_token_payload = cached_payload
@@ -2237,9 +2373,14 @@ class EncodingConfig:
             wm_note = " (auto-disabled for lossless stream copy)" if not self.use_watermark else ""
             return f"Mode: LOSSLESS (remux/stream copy) | Video: copy | Audio: copy | Watermark: {wm_text}{wm_note}"
         elif self.mode == "lossy":
+            # "lossless stream copy" is only true when audio is actually copied;
+            # a real encoder re-encodes, so claiming otherwise misleads.
+            codec = str(self.audio_codec or "copy").lower()
+            audio_note = ("lossless stream copy" if codec == "copy"
+                          else f"re-encoded to {self.audio_codec}")
             return (
                 f"Mode: LOSSY (H.265 10-bit) | Video: {self.video_codec} (CRF {self.crf}, preset {self.preset}, {self.pix_fmt}) "
-                f"| Audio: {self.audio_codec} (lossless stream copy) | Watermark: {wm_text}"
+                f"| Audio: {self.audio_codec} ({audio_note}) | Watermark: {wm_text}"
             )
         else:
             return f"Mode: CUSTOM | Video: {self.video_codec} | Audio: {self.audio_codec} | Watermark: {wm_text}"
@@ -2378,6 +2519,11 @@ class Crunchyroll(CrunchyrollBase):
         self._token_ttl = 240
         # Minimum delay before retrying a refresh that just failed.
         self._refresh_backoff = 60
+        # Which account the current token cache belongs to. Written into cache
+        # payloads so a token issued to one account is never reused for another.
+        self.last_login_account = None
+        # URL the MPD was fetched from; resolves relative segment addresses.
+        self.mpd_document_url = None
         playback_endpoints = list(CR_PLAYBACK_ENDPOINTS)
         if playback_endpoint:
             playback_endpoints = [playback_endpoint] + [
@@ -2773,6 +2919,10 @@ class Crunchyroll(CrunchyrollBase):
         if response.status_code != 200:
             raise ValueError(f"Failed to fetch MPD: {response.status_code} {response.text[:200]}")
         mpd_content = response.text
+        # Retained so relative BaseURL/SegmentTemplate values can be resolved
+        # against the manifest they were declared in; without it they stayed
+        # relative and could not be downloaded.
+        self.mpd_document_url = mpd_url
         mpd_license = parse_mpd_logic(mpd_content)
         pssh_values = [value for value in mpd_license["pssh"] if value]
         if not pssh_values:
