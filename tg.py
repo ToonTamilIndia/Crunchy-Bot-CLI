@@ -13,6 +13,7 @@ from platform_tools import display_command, resolve_executable, run_command, spl
 
 from crunchyroll import (
     Crunchyroll, CrunchyrollAuth, CrunchyrollLicense,
+    LicenseError, extract_content_key,
     parse_mpd_content, get_segment_link_list, download_segment,
     get_filter_complex, convert_vtt_to_srt_custom,
     get_episode_display_number, get_episode_title,
@@ -386,17 +387,21 @@ def get_download_access_filter():
 DOWNLOAD_ACCESS_FILTER = get_download_access_filter()
 
 
-def get_decryption_key(license_response):
-    if not license_response or "key" not in license_response:
+def get_decryption_key(license_response, kid=None):
+    """Resolve the content key for one track, delegating to the shared helper.
+
+    A single license covers every rendition and returns several keys that are
+    all typed CONTENT, so taking "the first CONTENT key" hands the video track
+    a key that belongs to a different rendition and the result decodes as
+    corrupt frames. `kid` is the track's default_KID from the MPD.
+
+    Returns None instead of raising so the call sites keep their existing
+    skip-this-episode behaviour.
+    """
+    try:
+        return extract_content_key(license_response, kid=kid)
+    except LicenseError:
         return None
-    keys = license_response.get("key") or []
-    for key in keys:
-        if str(key.get("type", "")).upper() == "CONTENT":
-            return "{}:{}".format(key["kid_hex"], key["key_hex"])
-    for key in keys:
-        if key.get("kid_hex") and key.get("key_hex"):
-            return "{}:{}".format(key["kid_hex"], key["key_hex"])
-    return None
 
 
 @app.on_message(filters.command("start"))
@@ -1159,16 +1164,20 @@ def process_download(client, user_id):
                     edit_message(status_msg, f"{ep_num_str}: Failed to fetch MPD. Skipping.")
                     continue
 
-                video_key_str = get_decryption_key(license_handler.get_license(pssh, token, ep_id, crunchyroll.token))
-                if not video_key_str:
-                    edit_message(status_msg, f"{ep_num_str}: Failed to get video license key. Skipping.")
-                    continue
-
-                selected_video_quality = state["data"]["selected_video_quality"]
+                wanted_video_quality = state["data"]["selected_video_quality"]
                 episode_video_list, _ = parse_mpd_content(mpd_content)
-                selected_video_quality = next((video for video in episode_video_list if video['height'] == selected_video_quality['height']), None)
+                selected_video_quality = next((video for video in episode_video_list if video['height'] == wanted_video_quality['height']), None)
                 if not selected_video_quality:
                     edit_message(status_msg, f"{ep_num_str}: Selected video quality is not available. Skipping.")
+                    continue
+
+                # Resolve the track first so its default_KID can select the right key.
+                video_key_str = get_decryption_key(
+                    license_handler.get_license(pssh, token, ep_id, crunchyroll.token),
+                    selected_video_quality.get('kid'),
+                )
+                if not video_key_str:
+                    edit_message(status_msg, f"{ep_num_str}: Failed to get video license key. Skipping.")
                     continue
 
                 vidseg = get_segment_link_list(mpd_content, selected_video_quality['name'], selected_video_quality['base_url'])
@@ -1197,12 +1206,16 @@ def process_download(client, user_id):
                     if not audio_mpd:
                         continue
 
-                    audio_keys = get_decryption_key(license_handler.get_license(audio_pssh, audio_token, target_guid, crunchyroll.token))
-                    if not audio_keys:
-                        continue
                     _, audio_mpd_audio_list = parse_mpd_content(audio_mpd)
                     highest_audio = max(audio_mpd_audio_list, key=lambda x: int(x.get('bandwidth', 0)), default=None)
                     if not highest_audio:
+                        continue
+
+                    audio_keys = get_decryption_key(
+                        license_handler.get_license(audio_pssh, audio_token, target_guid, crunchyroll.token),
+                        highest_audio.get('kid'),
+                    )
+                    if not audio_keys:
                         continue
 
                     audseg = get_segment_link_list(audio_mpd, highest_audio['name'], highest_audio['base_url'])
@@ -1314,7 +1327,16 @@ def process_download(client, user_id):
 
             edit_message(status_msg, "Starting download...")
 
-            video_key_str = get_decryption_key(license_handler.get_license(pssh, token, content_id, crunchyroll.token))
+            # Re-resolve the track from the MPD so the KID is present even if the
+            # stored selection predates it; fall back to the stored entry.
+            _video_tracks, _ = parse_mpd_content(mpd_content)
+            video_track = next((v for v in _video_tracks
+                                if v.get('name') == selected_video_quality.get('name')),
+                               selected_video_quality)
+            video_key_str = get_decryption_key(
+                license_handler.get_license(pssh, token, content_id, crunchyroll.token),
+                video_track.get('kid'),
+            )
             if not video_key_str:
                 raise Exception("Failed to get video license key.")
 
@@ -1335,14 +1357,17 @@ def process_download(client, user_id):
                 if not audio_mpd:
                     continue
 
-                audio_keys = get_decryption_key(license_handler.get_license(audio_pssh, audio_token, guid, crunchyroll.token))
-                if not audio_keys:
-                    print(f"Warning: Failed to get audio license key for {locale_name}. Skipping audio track.")
-                    continue
-
                 _, audio_mpd_audio_list = parse_mpd_content(audio_mpd)
                 highest_audio = max(audio_mpd_audio_list, key=lambda x: int(x.get('bandwidth', 0)), default=None)
                 if not highest_audio:
+                    continue
+
+                audio_keys = get_decryption_key(
+                    license_handler.get_license(audio_pssh, audio_token, guid, crunchyroll.token),
+                    highest_audio.get('kid'),
+                )
+                if not audio_keys:
+                    print(f"Warning: Failed to get audio license key for {locale_name}. Skipping audio track.")
                     continue
 
                 audseg = get_segment_link_list(audio_mpd, highest_audio['name'], highest_audio['base_url'])
@@ -1623,7 +1648,3 @@ if __name__ == "__main__":
     print("Starting bot...")
     app.run()
     print("Bot stopped.")
-
-
-
-
