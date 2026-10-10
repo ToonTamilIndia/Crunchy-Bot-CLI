@@ -45,3 +45,6 @@ error.txt
 
 # WVD license file
 *.wvd
+
+# Local developer diagnostics (not part of the shipped program)
+tools/
