@@ -283,6 +283,9 @@ if "watch" in video_url:
 
 
     vidseg = get_segment_link_list(mpd__content, video['name'], video['base_url'])
+    if not vidseg or "all" not in vidseg:
+        print("Failed to resolve video segments for this episode.")
+        exit()
     anime = re.sub(r"\s*\([^)]*\)", "", crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_title"])
     Title = anime + "." + "S" + str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"]).zfill(2) + "E" +  str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"]).zfill(2) + "-" + crunchyroll.get_single_info(id)["data"][0]["title"]
     if use_custom_title:
@@ -592,6 +595,9 @@ else:
     
 
         vidseg = get_segment_link_list(mpd__content, video['name'], video['base_url'])
+        if not vidseg or "all" not in vidseg:
+            print("Failed to resolve video segments for this episode.")
+            exit()
         anime = re.sub(r"\s*\([^)]*\)", "", crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_title"])
         Title = anime + "." + "S" + str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"]).zfill(2) + "E" +  str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"]).zfill(2) + "-" + crunchyroll.get_single_info(id)["data"][0]["title"]
         if use_custom_title:

@@ -523,15 +523,6 @@ def parse_mpd_content(mpd_content):
     video_list = []
     audio_list = []
 
-    def find_base_url(elem):
-        current = elem
-        while current is not None:
-            base_url_elem = current.find("ns:BaseURL", namespace)
-            if base_url_elem is not None and base_url_elem.text:
-                return base_url_elem.text.strip()
-            current = current.getparent()
-        return None
-
     for elem in representations:
         rep_id = elem.attrib.get('id', '')
         bandwidth = int(elem.attrib.get('bandwidth', 0))
@@ -542,7 +533,7 @@ def parse_mpd_content(mpd_content):
         width = int(width) if width else None
         height = int(height) if height else None
 
-        base_url = find_base_url(elem)
+        base_url = get_mpd_base_url(elem)
 
         if width and height:
             video_list.append({
@@ -607,68 +598,159 @@ def parse_mpd_logic(content):
     except Exception as e:
         raise RuntimeError(f"Unexpected error: {e}")
     
-def get_segment_link_list(mpd_content, representation_id, url):
-        if isinstance(mpd_content, str):
-            content = mpd_content.encode('utf-8')
-        else:
-            content = mpd_content
+def parse_iso8601_duration(value):
+    """Convert an ISO-8601 duration such as PT1H2M3.5S into seconds."""
+    if not value:
+        return 0.0
 
-        try:
-            tree = etree.fromstring(content)
-            
-            ns = {'dash': 'urn:mpeg:dash:schema:mpd:2011'}
-    
-            
-            representation = tree.find(f'.//dash:Representation[@id="{representation_id}"]', ns)
-            if representation is None:
-              return {}
+    match = re.fullmatch(
+        r'P(?:(\d+(?:\.\d+)?)Y)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)D)?'
+        r'(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?',
+        value.strip()
+    )
+    if not match:
+        return 0.0
+    years, months, days, hours, minutes, seconds = (float(g or 0) for g in match.groups())
+    return (
+        years * 31536000 + months * 2592000 + days * 86400
+        + hours * 3600 + minutes * 60 + seconds
+    )
 
-            adaptation_set = representation.getparent()
 
-            segment_template = representation.find('dash:SegmentTemplate', ns)
-            if segment_template is None and adaptation_set is not None:
-                segment_template = adaptation_set.find('dash:SegmentTemplate', ns)
-            if segment_template is None:
-              return {}
-    
-            segment_timeline = segment_template.find('dash:SegmentTimeline', ns)
-            if segment_timeline is None:
-              return {}
-    
-            media_template = segment_template.get('media')
-            init_template = segment_template.get('initialization')
-            if not media_template or not init_template:
-                return {}
-            
-            
-            bandwidth = representation.get('bandwidth', '')
-            
-            def resolve_dash_template(template, representation_id="", bandwidth="", number=None, time_val=None):
-                pattern = r'\$(RepresentationID|Number|Bandwidth|Time)(%[0-9]*d)?\$'
-                def repl(m):
-                    i, f = m.group(1), m.group(2)
-                    if i == 'RepresentationID':
-                        val = representation_id
-                    elif i == 'Bandwidth':
-                        val = bandwidth
-                    elif i == 'Number':
-                        if number is None:
-                            return m.group(0)
-                        val = number
-                    elif i == 'Time':
-                        if time_val is None:
-                            return m.group(0)
-                        val = time_val
-                    else:
+def get_mpd_base_url(elem):
+    """Walk up the MPD tree for the nearest BaseURL text."""
+    namespace = {'ns': 'urn:mpeg:dash:schema:mpd:2011'}
+    current = elem
+    while current is not None:
+        base_url_elem = current.find('ns:BaseURL', namespace)
+        if base_url_elem is not None and base_url_elem.text:
+            return base_url_elem.text.strip()
+        current = current.getparent()
+    return None
+
+
+def get_mpd_total_ticks(tree, period, segment_template):
+    """Total presentation length of a period, in the segment template timescale."""
+    timescale = int(segment_template.get('timescale', '1') or 1)
+    seconds = 0.0
+    if period is not None:
+        seconds = parse_iso8601_duration(period.get('duration'))
+    if not seconds:
+        seconds = parse_iso8601_duration(tree.get('mediaPresentationDuration'))
+    return int(seconds * timescale)
+
+
+def get_segment_link_list(mpd_content, representation_id, url=""):
+    """Resolve the downloadable segment URLs for one DASH representation.
+
+    Crunchyroll does not always ship the same addressing mode, so all of the
+    common ones are handled: SegmentTimeline, fixed-duration SegmentTemplate,
+    explicit SegmentList, and single-file SegmentBase. The result holds "init"
+    (None when the stream has no separate initialization segment), "segments"
+    (media segments only) and "all" (init first, then segments). An empty dict
+    means the representation could not be resolved.
+    """
+    if isinstance(mpd_content, str):
+        content = mpd_content.encode('utf-8')
+    else:
+        content = mpd_content
+
+    try:
+        tree = etree.fromstring(content)
+    except etree.XMLSyntaxError as e:
+        print(f"An error occurred: invalid MPD content: {e}")
+        return {}
+
+    ns = {'dash': 'urn:mpeg:dash:schema:mpd:2011'}
+
+    try:
+        representation = tree.find(f'.//dash:Representation[@id="{representation_id}"]', ns)
+        if representation is None:
+            return {}
+
+        adaptation_set = representation.getparent()
+        period = representation
+        while period is not None and period.tag != f'{{{ns["dash"]}}}Period':
+            period = period.getparent()
+
+        def find_first(tag):
+            found = representation.find(f'dash:{tag}', ns)
+            if found is None and adaptation_set is not None:
+                found = adaptation_set.find(f'dash:{tag}', ns)
+            return found
+
+        base = (url or "").strip()
+        if not base:
+            base = get_mpd_base_url(representation) or ""
+
+        def absolute(path):
+            return urljoin(base, path) if base else path
+
+        bandwidth = representation.get('bandwidth', '')
+
+        def resolve_dash_template(template, number=None, time_val=None):
+            pattern = r'\$(RepresentationID|Number|Bandwidth|Time)(%[0-9]*[di])?\$'
+            def repl(m):
+                key, fmt = m.group(1), m.group(2)
+                if key == 'RepresentationID':
+                    val = representation_id
+                elif key == 'Bandwidth':
+                    val = bandwidth
+                elif key == 'Number':
+                    if number is None:
                         return m.group(0)
-                    return f % int(val) if f else str(val)
-                return re.sub(pattern, repl, template)
+                    val = number
+                elif key == 'Time':
+                    if time_val is None:
+                        return m.group(0)
+                    val = time_val
+                else:
+                    return m.group(0)
+                return fmt % int(val) if fmt else str(val)
+            return re.sub(pattern, repl, template)
 
-            init_file = resolve_dash_template(init_template, representation_id=representation_id, bandwidth=bandwidth)
-            
-            segment_list = []
-            segment_all = []
-            segment_all.append(urljoin(url, init_file))
+        # Single-file segmented asset: the base URL already is the full stream.
+        if find_first('SegmentBase') is not None:
+            if not base:
+                return {}
+            return {"init": None, "segments": [base], "all": [base]}
+
+        # Explicit segment list.
+        segment_list = find_first('SegmentList')
+        if segment_list is not None:
+            initialization = segment_list.find('dash:Initialization', ns)
+            init_url = None
+            if initialization is not None and initialization.get('sourceURL'):
+                init_url = absolute(initialization.get('sourceURL'))
+            segments = [
+                absolute(segment.get('media'))
+                for segment in segment_list.findall('dash:SegmentURL', ns)
+                if segment.get('media')
+            ]
+            if not segments:
+                return {}
+            return {
+                "init": init_url,
+                "segments": segments,
+                "all": ([init_url] if init_url else []) + segments,
+            }
+
+        segment_template = find_first('SegmentTemplate')
+        if segment_template is None:
+            return {}
+
+        media_template = segment_template.get('media')
+        if not media_template:
+            return {}
+
+        init_template = segment_template.get('initialization')
+        init_url = absolute(resolve_dash_template(init_template)) if init_template else None
+        segment_timeline = segment_template.find('dash:SegmentTimeline', ns)
+        start_number = int(segment_template.get('startNumber', '1') or 1)
+        time_offset = int(segment_template.get('presentationTimeOffset', '0') or 0)
+
+        segments = []
+        if segment_timeline is not None:
             current_time = 0
             for segment in segment_timeline.findall('dash:S', ns):
                 t_attr = segment.get('t')
@@ -679,31 +761,42 @@ def get_segment_link_list(mpd_content, representation_id, url):
                 if not d_attr:
                     continue
                 duration = int(d_attr)
-                
+
                 repeat_count = 1
                 if r_attr is not None:
                     repeat_count = int(r_attr) + 1
-    
+
                 for _ in range(repeat_count):
-                    segment_file = resolve_dash_template(
+                    segments.append(absolute(resolve_dash_template(
                         media_template,
-                        representation_id=representation_id,
-                        bandwidth=bandwidth,
-                        number=len(segment_list) + 1,
+                        number=len(segments) + start_number,
                         time_val=current_time
-                    )
-                    segment_list.append(urljoin(url, segment_file))
-                    segment_all.append(urljoin(url, segment_file))
+                    )))
                     current_time += duration
-    
-    
-            init_url = urljoin(url, init_file)
-    
-    
-            return {"init": init_url, "segments": segment_list, "all": segment_all}
-        except Exception as e:
-            print(f"An error occurred: {e}")
+        elif segment_template.get('duration'):
+            segment_duration = int(segment_template.get('duration'))
+            total_ticks = get_mpd_total_ticks(tree, period, segment_template)
+            if segment_duration > 0:
+                for index in range(-(-total_ticks // segment_duration)):
+                    segments.append(absolute(resolve_dash_template(
+                        media_template,
+                        number=index + start_number,
+                        time_val=time_offset + index * segment_duration
+                    )))
+        else:
             return {}
+
+        if not segments:
+            return {}
+
+        return {
+            "init": init_url,
+            "segments": segments,
+            "all": ([init_url] if init_url else []) + segments,
+        }
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return {}
 
 
 def get_episode_display_number(episode, fallback):
