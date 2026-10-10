@@ -147,7 +147,13 @@ class Miscellaneous:
         return f"Crunchyroll/3.97.0 Android/{android_version} okhttp/{okhttp_version}"
 
 CR_TRUSTED_HOSTS = {"crunchyroll.com", "www.crunchyroll.com"}
-CR_TRUSTED_HOST_SUFFIXES = (".crunchyroll.com", ".crunchyrollcdn.com")
+# Playback, token and license endpoints are served from crunchyrollsvc.com, which
+# is a separate registrable domain from crunchyroll.com. The CDN is a third.
+CR_TRUSTED_HOST_SUFFIXES = (
+    ".crunchyroll.com",
+    ".crunchyrollcdn.com",
+    ".crunchyrollsvc.com",
+)
 _SENSITIVE_HEADERS = {"authorization", "cookie"}
 
 
