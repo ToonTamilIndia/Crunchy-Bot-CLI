@@ -34,6 +34,11 @@ Temp/
 *.session-journal
 .crunchyroll_tokens/
 
+# Live session cookies (never commit)
+cookie.txt
+cookies.txt
+*cookies*.txt
+
 # Log files
 *.log
 error.txt

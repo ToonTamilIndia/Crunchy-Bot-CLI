@@ -36,6 +36,9 @@ def resolve_executable(name, configured_path=None, project_fallback=True):
             candidates.append(APP_ROOT / f"{name}-macos")
         else:
             candidates.append(APP_ROOT / executable_name(name))
+        # Only fall back to the extensionless build where it can actually run.
+        # The repository ships a Linux ELF named `mp4decrypt`; on Windows that
+        # file exists but cannot execute, so selecting it would fail at spawn.
         if os.name != "nt" and platform.system() != "Darwin":
             candidates.append(APP_ROOT / name)
 
@@ -44,9 +47,16 @@ def resolve_executable(name, configured_path=None, project_fallback=True):
             return str(candidate.resolve())
 
     searched = ", ".join(str(path) for path in candidates) or "system PATH"
+    hint = ""
+    if name == "mp4decrypt" and os.name == "nt":
+        hint = (
+            " The copy bundled with this project is a Linux binary and cannot run "
+            "on Windows. Download the Windows build of Bento4's mp4decrypt and "
+            "either place mp4decrypt.exe next to this script or add it to PATH."
+        )
     raise FileNotFoundError(
         f"{name} was not found. Install it for {sys.platform} or configure its path "
-        f"(searched: {searched})."
+        f"(searched: {searched}).{hint}"
     )
 
 

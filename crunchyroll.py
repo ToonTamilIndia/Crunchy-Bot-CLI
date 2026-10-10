@@ -6,11 +6,12 @@ import re
 import json
 from lxml import etree
 import base64
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlparse
 import os
 import requests
 import subprocess
 import contextlib
+import tempfile
 from pathlib import Path
 from tqdm import tqdm
 from datetime import datetime
@@ -145,6 +146,30 @@ class Miscellaneous:
         okhttp_version = f"4.12.{random.randint(0, 9)}"
         return f"Crunchyroll/3.97.0 Android/{android_version} okhttp/{okhttp_version}"
 
+CR_TRUSTED_HOSTS = {"crunchyroll.com", "www.crunchyroll.com"}
+CR_TRUSTED_HOST_SUFFIXES = (".crunchyroll.com", ".crunchyrollcdn.com")
+_SENSITIVE_HEADERS = {"authorization", "cookie"}
+
+
+def is_crunchyroll_url(url):
+    """True when the URL belongs to a Crunchyroll-owned host.
+
+    The session object is shared across every request the library makes,
+    including fetches of community-maintained metadata such as data.json. Session
+    cookies and session headers are not host-scoped by tls_client, so anything
+    that is not a Crunchyroll host must never receive them.
+    """
+    try:
+        host = (urlparse(str(url)).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host in CR_TRUSTED_HOSTS:
+        return True
+    return any(host.endswith(suffix) for suffix in CR_TRUSTED_HOST_SUFFIXES)
+
+
 class CrunchyrollBase:
     def __init__(self):
         self.session = tls_client.Session("okhttp4_android_13", random_tls_extension_order=True)
@@ -157,7 +182,46 @@ class CrunchyrollBase:
     def request(self, method, url, **kwargs):
         if use_proxy and proxy:
             kwargs.setdefault("proxy", proxy)
-        return getattr(self.session, method)(url, **kwargs)
+        if is_crunchyroll_url(url):
+            return getattr(self.session, method)(url, **kwargs)
+
+        # Non-Crunchyroll host: tls_client merges per-request cookies into a
+        # persistent jar and does not scope them by host, so a saved etp_rt would
+        # ride along to any third party. Detach the jar and credentials for the
+        # duration of this call, then restore them.
+        saved_cookies = getattr(self.session, "cookies", None)
+        saved_headers = {}
+        session_headers = getattr(self.session, "headers", None)
+        try:
+            if session_headers:
+                for key in list(session_headers):
+                    if str(key).lower() in _SENSITIVE_HEADERS:
+                        saved_headers[key] = session_headers.pop(key)
+        except (AttributeError, TypeError, KeyError):
+            saved_headers = {}
+
+        kwargs.pop("cookies", None)
+        headers = kwargs.pop("headers", None)
+        if headers:
+            headers = {
+                key: value for key, value in headers.items()
+                if str(key).lower() not in _SENSITIVE_HEADERS
+            }
+            if headers:
+                kwargs["headers"] = headers
+
+        detached = False
+        try:
+            if saved_cookies is not None:
+                self.session.cookies = tls_client.cookies.RequestsCookieJar()
+                detached = True
+            return getattr(self.session, method)(url, **kwargs)
+        finally:
+            if detached:
+                self.session.cookies = saved_cookies
+            if session_headers is not None:
+                for key, value in saved_headers.items():
+                    session_headers[key] = value
 
 
 def _http_request(method, url, **kwargs):
@@ -318,17 +382,117 @@ class CrunchyrollLicense(CrunchyrollBase):
                 with contextlib.suppress(Exception):
                     self.request("patch", f"{CR_PLAYBACK_TOKEN_BASE}/{content_id}/{token}/inactive", json={})
 
+def resolve_batch_subtitles(selected_languages, track_info_list, locale_map=None):
+    """Re-resolve a one-time subtitle choice against one episode's track list.
+
+    Batch mode prompts once and replays the answer for every episode, but track
+    lists differ between episodes. Resolving by language instead of by the stored
+    index avoids both IndexError and the silent failure where a differently
+    ordered list muxes the wrong language.
+    """
+    locale_map = locale_map or {}
+    selected = []
+    for wanted in selected_languages or []:
+        entry = next((t for t in track_info_list if t.get("language") == wanted), None)
+        if entry is None:
+            continue
+        selected.append({
+            "language": locale_map.get(entry["language"], entry["language"]),
+            "url": entry["url"],
+            "format": entry["format"],
+            "type": entry["type"],
+        })
+    return selected
+
+
+def resolve_batch_audios(selected_locales, versions, locale_map=None):
+    """Re-resolve a one-time audio choice against one episode's version list.
+
+    Returns (resolved, missing) so a caller can skip an absent dub and carry on
+    rather than aborting every remaining episode.
+    """
+    locale_map = locale_map or {}
+    resolved = []
+    missing = []
+    for locale in selected_locales or []:
+        matches = [v for v in versions if v.get("audio_locale") == locale]
+        if not matches:
+            missing.append(locale)
+            continue
+        resolved.append({
+            "audio_locale": locale_map.get(locale, locale),
+            "guid": matches[0]["guid"],
+        })
+    return resolved, missing
+
+
+def resolve_video_quality(video_list, chosen_index, chosen_height):
+    """Return the requested rendition, or the closest height if it is absent."""
+    if not video_list:
+        return None
+    if isinstance(chosen_index, int) and 0 <= chosen_index < len(video_list):
+        return video_list[chosen_index]
+    return min(video_list, key=lambda item: abs(item.get("height", 0) - chosen_height))
+
+
+def dedup_preserving_order(values):
+    """Order-preserving de-duplication for comma-separated track selections."""
+    seen = []
+    for value in values or []:
+        if value not in seen:
+            seen.append(value)
+    return seen
+
+
+def build_byte_ranges(total_size, parts):
+    """Split total_size into up to `parts` contiguous inclusive byte ranges.
+
+    Ranges tile the file exactly once, so a parallel fetch can be concatenated in
+    order without duplicating or dropping bytes. Returns [] for an unusable size.
+    """
+    if not isinstance(total_size, int) or isinstance(total_size, bool):
+        return []
+    if total_size <= 0 or parts < 1:
+        return []
+    parts = min(parts, total_size)
+    chunk_size = -(-total_size // parts)
+    return [
+        (start, min(start + chunk_size, total_size) - 1)
+        for start in range(0, total_size, chunk_size)
+    ]
+
+
+def parse_content_range_total(header_text):
+    """Read the complete resource size out of a `Content-Range: bytes a-b/TOTAL`.
+
+    Returns None when the server sent no range header or an unsized (``*``) one,
+    which means it ignored the Range request and cannot be split safely.
+    """
+    if not header_text:
+        return None
+    match = re.search(r'content-range:\s*bytes\s+\d+-\d+/(\d+|\*)', header_text, re.IGNORECASE)
+    if not match or match.group(1) == '*':
+        return None
+    return int(match.group(1))
+
+
 def download_segment(segment_links, name, format, max_threads=20, headers=None, user_agent=None):
+    # Always start from an empty scratch directory. Leftover parts from a previous
+    # failed run would otherwise be resumed and concatenated into the output,
+    # because multi-segment parts carry no expected length to validate against.
+    shutil.rmtree(get_segment_temp_dir(name), ignore_errors=True)
     base_temp_dir = get_segment_temp_dir(name)
     output_path = get_encrypted_media_path(name, format)
+
+    if not segment_links:
+        raise RuntimeError("No segments were resolved for this stream.")
 
     total = len(segment_links)
     configured_threads = globals().get("download_threads")
     if isinstance(configured_threads, int) and configured_threads > 0:
         max_threads = configured_threads
-    max_threads = max(1, min(max_threads, total))
-    buffers = [None] * total
     failed_segments = []
+    assembled_expected_size = None
 
     progress_bar = tqdm(total=total, desc=f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [INFO] : ", unit="file")
 
@@ -352,16 +516,22 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
 
     normalized_headers = normalize_headers(headers, user_agent)
 
-    def build_curl_cmd(url, temp_path, max_time="30"):
+    def build_curl_cmd(url, temp_path, stall_time="30", resume=True):
+        # --speed-limit/--speed-time abort only when throughput stays under the
+        # floor for stall_time seconds. --max-time would instead cap the whole
+        # transfer, which can never complete a large single-file representation.
         cmd = [
             "curl", "-sS", "-L", "--fail",
             "--connect-timeout", "10",
-            "--max-time", max_time,
+            "--speed-limit", "1024",
+            "--speed-time", str(stall_time),
             "--retry", "2",
             "--retry-all-errors",
             "--retry-delay", "1",
             "--retry-max-time", "60",
         ]
+        if resume:
+            cmd.extend(["-C", "-"])
         for key, value in normalized_headers.items():
             cmd.extend(["-H", f"{key}: {value}"])
         cmd.extend([url.strip(), "-o", temp_path])
@@ -370,46 +540,141 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
             cmd.insert(-2, proxy)
         return cmd
 
-    def download_single(index, url):
-        temp_path = os.path.join(base_temp_dir, f"segment_{index}.ts")
+    def run_curl(url, temp_path, stall_time):
+        # Resume when a partial file exists; fall back to a clean fetch when the
+        # server rejects byte ranges, otherwise the resume would never progress.
+        if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+            result = subprocess.run(
+                build_curl_cmd(url, temp_path, stall_time, resume=True),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if result.returncode != 33:
+                return result
+            with contextlib.suppress(Exception):
+                os.remove(temp_path)
+        return subprocess.run(
+            build_curl_cmd(url, temp_path, stall_time, resume=False),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def run_curl_range(url, temp_path, stall_time, byte_range):
+        start, end = byte_range
+        cmd = build_curl_cmd(url, temp_path, stall_time, resume=False)
+        cmd.extend(["-r", f"{start}-{end}"])
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result
+
+    def probe_total_size(url):
+        # One-byte Range request: confirms the CDN honours ranges and returns the
+        # full size, which is what makes a split fetch safe.
+        cmd = [
+            "curl", "-sS", "-L", "--fail",
+            "--connect-timeout", "10",
+            "--max-time", "20",
+            "-r", "0-0",
+            "-D", "-",
+            "-o", os.devnull,
+        ]
+        for key, value in normalized_headers.items():
+            cmd.extend(["-H", f"{key}: {value}"])
+        cmd.append(url.strip())
+        if use_proxy:
+            cmd.extend(["--proxy", proxy])
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        return parse_content_range_total(result.stdout.decode('utf-8', errors='ignore'))
+
+    # A SegmentBase representation is one large file, so segment-level threading
+    # cannot help it. Fan it out into contiguous byte ranges instead, and fall
+    # back to the single-stream path when the CDN will not serve ranges.
+    tasks = []
+    if total == 1:
+        single_url = segment_links[0]
+        single_size = probe_total_size(single_url)
+        ranges = build_byte_ranges(single_size, max_threads) if single_size else []
+        if len(ranges) > 1:
+            progress_bar.reset(total=len(ranges))
+            for part_index, (start, end) in enumerate(ranges):
+                tasks.append({
+                    "url": single_url,
+                    "path": os.path.join(base_temp_dir, f"part_{part_index:04d}.ts"),
+                    "byte_range": (start, end),
+                    "expected": end - start + 1,
+                })
+            assembled_expected_size = single_size
+            print(f"[INFO] Single-file representation ({single_size} bytes) split into {len(ranges)} parallel ranges.")
+
+    if not tasks:
+        for index, url in enumerate(segment_links):
+            tasks.append({
+                "url": url,
+                "path": os.path.join(base_temp_dir, f"segment_{index}.ts"),
+                "byte_range": None,
+                "expected": None,
+            })
+
+    # Clamp concurrency to the work actually queued, which is the segment count
+    # normally but the byte-range part count for a split single-file fetch.
+    max_workers = max(1, min(max_threads, len(tasks)))
+
+    def verify_task(task):
+        if not os.path.exists(task["path"]):
+            return False
+        size = os.path.getsize(task["path"])
+        expected = task["expected"]
+        if expected is None:
+            return size > 0
+        return size == expected
+
+    def fetch_task(task, stall_time):
+        try:
+            if task["byte_range"] is None:
+                result = run_curl(task["url"], task["path"], stall_time)
+            else:
+                result = run_curl_range(task["url"], task["path"], stall_time, task["byte_range"])
+            if result.returncode == 0 and verify_task(task):
+                return True
+            err_msg = result.stderr.decode('utf-8', errors='ignore').strip()
+            print(f"\n[DEBUG] Segment fetch failed with returncode {result.returncode}. Error: {err_msg}. URL: {task['url'].strip()}")
+        except Exception as e:
+            print(f"\n[DEBUG] Segment fetch exception: {e}")
+        return False
+
+    def download_task(index, task):
         for retry in range(max_retries):
-            try:
-                cmd = build_curl_cmd(url, temp_path)
-                result = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                if result.returncode == 0 and os.path.exists(temp_path):
-                    if os.path.getsize(temp_path) > 0:
-                        with open(temp_path, 'rb') as f:
-                            content = f.read()
-                        return index, content
-                else:
-                    err_msg = result.stderr.decode('utf-8', errors='ignore')
-                    print(f"\n[DEBUG] Segment {index} download failed with returncode {result.returncode}. Error: {err_msg}. URL: {url.strip()}")
-            except Exception as e:
-                print(f"\n[DEBUG] Segment {index} download exception: {e}")
-                pass
+            if fetch_task(task, "30"):
+                return index, True
             backoff = retry_delay * (2 ** retry)
             time.sleep(backoff + random.uniform(0.0, 0.5))
             print(f"[WARN] Segment {index} failed retrying ({retry + 1}/{max_retries}).")
         with contextlib.suppress(Exception):
-            os.remove(temp_path)
-        return index, None
-         
-    with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            os.remove(task["path"])
+        return index, False
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_index = {
-            executor.submit(download_single, i, url): i
-            for i, url in enumerate(segment_links)
+            executor.submit(download_task, i, task): i
+            for i, task in enumerate(tasks)
         }
 
         for future in as_completed(future_to_index):
-            index, content = future.result()
-            if content:
-                buffers[index] = content
-            else:
-                failed_segments.append((index, segment_links[index]))
+            index, ok = future.result()
+            if not ok:
+                failed_segments.append((index, tasks[index]["url"]))
             progress_bar.update(1)
 
     progress_bar.close()
@@ -418,37 +683,43 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
     if failed_segments:
         print(f"[INFO] Retrying {len(failed_segments)} failed segments one last time...")
         for index, url in failed_segments[:]:
-            temp_path = os.path.join(base_temp_dir, f"segment_{index}.ts")
+            task = tasks[index]
             try:
-                cmd = build_curl_cmd(url, temp_path, max_time="60")
-                result = subprocess.run(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                if result.returncode == 0 and os.path.exists(temp_path):
-                    if os.path.getsize(temp_path) > 0:
-                        with open(temp_path, 'rb') as f:
-                            content = f.read()
-                        buffers[index] = content
-                        failed_segments.remove((index, url))
-            except Exception:
-                pass
+                if fetch_task(task, "60") and verify_task(task):
+                    failed_segments.remove((index, url))
+            except Exception as e:
+                print(f"[DEBUG] Segment {index} final retry exception: {e}")
             time.sleep(retry_delay)
 
    
     if failed_segments:
-        with open("error.txt", "w", encoding="utf-8") as error_file:
-            for index, url in failed_segments:
-                error_file.write(f"{index}: {url.strip()}\n")
-                print(f"[WARN] Segment {index} failed permanently after retries.")
+        error_path = APP_ROOT / "error.txt"
+        try:
+            with open(error_path, "w", encoding="utf-8") as error_file:
+                for index, url in failed_segments:
+                    error_file.write(f"{index}: {url.strip()}\n")
+        except OSError as exc:
+            print(f"[WARN] Could not write failure report to {error_path}: {exc}")
+        for index, url in failed_segments:
+            print(f"[WARN] Segment {index} failed permanently after retries.")
+        shutil.rmtree(base_temp_dir, ignore_errors=True)
         raise RuntimeError("Download failed: one or more segments could not be retrieved.")
 
    
     with open(output_path, 'wb') as out_file:
-        for data in buffers:
-            if data:
-                out_file.write(data)
+        # Copy in fixed-size chunks so peak memory stays flat regardless of
+        # whether this is many small segments or one multi-hundred-MB file.
+        for task in tasks:
+            with open(task["path"], 'rb') as part:
+                shutil.copyfileobj(part, out_file, length=1024 * 1024)
+
+    if assembled_expected_size is not None:
+        written = os.path.getsize(output_path)
+        if written != assembled_expected_size:
+            shutil.rmtree(base_temp_dir, ignore_errors=True)
+            raise RuntimeError(
+                f"Assembled file is truncated: expected {assembled_expected_size} bytes, wrote {written}."
+            )
 
     shutil.rmtree(base_temp_dir, ignore_errors=True)
 
@@ -618,13 +889,56 @@ def parse_iso8601_duration(value):
 
 
 def get_mpd_base_url(elem):
-    """Walk up the MPD tree for the nearest BaseURL text."""
+    """Resolve the effective BaseURL for an element per DASH inheritance rules.
+
+    The spec defines the effective BaseURL by resolving each level's BaseURL
+    against its parent, outermost first: MPD, then Period, AdaptationSet and
+    Representation. Walking up and returning the first hit found drops the outer
+    components and silently yields relative URLs.
+    """
     namespace = {'ns': 'urn:mpeg:dash:schema:mpd:2011'}
+    chain = []
     current = elem
     while current is not None:
         base_url_elem = current.find('ns:BaseURL', namespace)
-        if base_url_elem is not None and base_url_elem.text:
-            return base_url_elem.text.strip()
+        if base_url_elem is not None and base_url_elem.text and base_url_elem.text.strip():
+            chain.append(base_url_elem.text.strip())
+        current = current.getparent()
+    if not chain:
+        return None
+
+    resolved = ""
+    for text in reversed(chain):          # outermost (MPD) level first
+        if not resolved:
+            resolved = text
+            continue
+        if re.match(r'^[A-Za-z][A-Za-z0-9+.\-]*:', text):
+            # An absolute BaseURL replaces everything accumulated so far.
+            resolved = text
+            continue
+        if not resolved.endswith('/'):
+            # A BaseURL without a trailing slash names a file, so the child is
+            # resolved against its directory.
+            resolved += '/'
+        resolved = urljoin(resolved, text)
+    return resolved
+
+
+def find_inherited(elem, tag, namespace):
+    """Find a descendant-or-self `tag`, walking up to Period and MPD level.
+
+    DASH allows SegmentTemplate, SegmentList and SegmentBase to be declared on
+    the MPD, Period or AdaptationSet and inherited by each Representation, so a
+    lookup that only inspects the Representation and its parent resolves nothing.
+    """
+    if elem is None:
+        return None
+    tag_q = f'{{{namespace["dash"]}}}{tag}'
+    current = elem
+    while current is not None and current.tag != tag_q:
+        found = current.find(f'dash:{tag}', namespace)
+        if found is not None:
+            return found
         current = current.getparent()
     return None
 
@@ -635,6 +949,14 @@ def get_mpd_total_ticks(tree, period, segment_template):
     seconds = 0.0
     if period is not None:
         seconds = parse_iso8601_duration(period.get('duration'))
+    if not seconds and period is not None:
+        start = period.get('start')
+        if start:
+            seconds = max(
+                0.0,
+                parse_iso8601_duration(tree.get('mediaPresentationDuration'))
+                - parse_iso8601_duration(start),
+            )
     if not seconds:
         seconds = parse_iso8601_duration(tree.get('mediaPresentationDuration'))
     return int(seconds * timescale)
@@ -674,10 +996,7 @@ def get_segment_link_list(mpd_content, representation_id, url=""):
             period = period.getparent()
 
         def find_first(tag):
-            found = representation.find(f'dash:{tag}', ns)
-            if found is None and adaptation_set is not None:
-                found = adaptation_set.find(f'dash:{tag}', ns)
-            return found
+            return find_inherited(representation, tag, ns)
 
         base = (url or "").strip()
         if not base:
@@ -751,6 +1070,7 @@ def get_segment_link_list(mpd_content, representation_id, url=""):
 
         segments = []
         if segment_timeline is not None:
+            total_ticks = get_mpd_total_ticks(tree, period, segment_template)
             current_time = 0
             for segment in segment_timeline.findall('dash:S', ns):
                 t_attr = segment.get('t')
@@ -762,9 +1082,21 @@ def get_segment_link_list(mpd_content, representation_id, url=""):
                     continue
                 duration = int(d_attr)
 
-                repeat_count = 1
                 if r_attr is not None:
-                    repeat_count = int(r_attr) + 1
+                    repeat_count = int(r_attr)
+                    if repeat_count < 0:
+                        # r="-1" means "repeat until the end of the Period". It has
+                        # to be derived from the period length; treating it as
+                        # r+1 yields zero repeats and truncates the episode.
+                        if duration <= 0 or total_ticks <= 0:
+                            repeat_count = 0
+                        else:
+                            remaining = max(0, total_ticks - current_time)
+                            repeat_count = -(-remaining // duration)
+                    else:
+                        repeat_count += 1
+                else:
+                    repeat_count = 1
 
                 for _ in range(repeat_count):
                     segments.append(absolute(resolve_dash_template(
@@ -867,6 +1199,43 @@ def parse_episode_selection(selection, total):
     return selected
 
 
+def _write_secret_json(path, data):
+    """Atomically write a credential file that is never briefly world-readable.
+
+    Opening with mode 0o600 from the start avoids the window in which a token
+    sits on disk with default permissions, and writing to a temporary file before
+    os.replace() means a crash or a concurrent writer can never leave a torn,
+    permanently-unreadable cache behind.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = None
+    tmp_path = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+        )
+        tmp_path = Path(tmp_name)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
+            json.dump(data, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        tmp_path = None
+        with contextlib.suppress(Exception):
+            os.chmod(path, 0o600)
+        return True
+    except Exception:
+        return False
+    finally:
+        if fd is not None:
+            with contextlib.suppress(Exception):
+                os.close(fd)
+        if tmp_path is not None:
+            with contextlib.suppress(Exception):
+                os.remove(tmp_path)
+
+
 class CrunchyrollAuth(CrunchyrollBase):
     def __init__(self):
         super().__init__()
@@ -875,6 +1244,9 @@ class CrunchyrollAuth(CrunchyrollBase):
         self.last_auth_error = None
         self.last_auth_context = None
         self.last_token_payload = {}
+        # Result of the (now defunct) community auth-data lookup, cached so the
+        # request is made at most once per instance.
+        self._crd_auth_cache = None
 
     def _set_auth_headers(self, authorization_header, user_agent, extra_headers=None):
         headers = {
@@ -957,12 +1329,9 @@ class CrunchyrollAuth(CrunchyrollBase):
             token_payload["expires_at"] = int(time.time()) + int(token_payload["expires_in"])
         try:
             path = self._etp_rt_cache_path()
-            with path.open("w", encoding="utf-8") as token_file:
-                json.dump(token_payload, token_file, indent=2)
-            with contextlib.suppress(Exception):
-                path.chmod(0o600)
         except Exception:
             return
+        _write_secret_json(path, token_payload)
 
     def _configured_etp_rt(self):
         return str(_config_value("etp_rt_token", "CRUNCHYROLL_ETP_RT", "ETP_RT") or "").strip()
@@ -1042,12 +1411,9 @@ class CrunchyrollAuth(CrunchyrollBase):
             token_payload["expires_at"] = int(time.time()) + int(token_payload["expires_in"])
         try:
             cache_path = self._token_cache_path(profile)
-            with cache_path.open("w", encoding="utf-8") as token_file:
-                json.dump(token_payload, token_file, indent=2)
-            with contextlib.suppress(Exception):
-                cache_path.chmod(0o600)
         except Exception:
             return
+        _write_secret_json(cache_path, token_payload)
 
     @staticmethod
     def _has_valid_access_token(payload):
@@ -1110,11 +1476,27 @@ class CrunchyrollAuth(CrunchyrollBase):
         )
 
     def _fetch_crd_auth_json(self):
+        """Fetch the community auth data once per instance.
+
+        The upstream Crunchy-DL/Crunchy-Downloader project is gone (the Pages
+        site and the repository both answer 404), so this previously burned two
+        round-trips on every single authenticate() call only to fall back to the
+        built-in profiles. The outcome, including failure, is cached so the cost
+        is paid at most once.
+        """
+        if self._crd_auth_cache is not None:
+            return self._crd_auth_cache
+
         urls = []
         configured_url = _config_value("crd_auth_data_url", "CRD_AUTH_DATA_URL")
         if configured_url:
             urls.append(configured_url)
         urls.extend(CRD_AUTH_DATA_URLS)
+
+        if _config_value("disable_crd_auth_updates", "DISABLE_CRD_AUTH_UPDATES"):
+            self._crd_auth_cache = []
+            return self._crd_auth_cache
+
         for url in urls:
             try:
                 response = self.request("get", url, headers={"User-Agent": "C# App"})
@@ -1123,10 +1505,14 @@ class CrunchyrollAuth(CrunchyrollBase):
                     continue
                 payload = response.json()
                 if isinstance(payload, list):
-                    return payload
+                    self._crd_auth_cache = payload
+                    return self._crd_auth_cache
             except Exception as error:
                 cr_debug(f"CRD auth data {url}: {error}")
-        return []
+
+        cr_debug("CRD auth data unavailable; using built-in auth profiles")
+        self._crd_auth_cache = []
+        return self._crd_auth_cache
 
     def _profiles_with_crd_updates(self):
         profiles = [dict(profile) for profile in CR_AUTH_PROFILES]
@@ -1668,6 +2054,8 @@ class Crunchyroll(CrunchyrollBase):
         # Crunchyroll access tokens typically expire in 300s (5 min);
         # refresh proactively 60s before expiry to avoid mid-request failures
         self._token_ttl = 240
+        # Minimum delay before retrying a refresh that just failed.
+        self._refresh_backoff = 60
         playback_endpoints = list(CR_PLAYBACK_ENDPOINTS)
         if playback_endpoint:
             playback_endpoints = [playback_endpoint] + [
@@ -1716,8 +2104,22 @@ class Crunchyroll(CrunchyrollBase):
                 cr_debug("access token still valid per auth cache")
             else:
                 cr_debug(f"token refresh failed: {self._auth.last_auth_error}")
+                self._backoff_after_failed_refresh()
         except Exception as error:
             cr_debug(f"token refresh error: {error}")
+            self._backoff_after_failed_refresh()
+
+    def _backoff_after_failed_refresh(self):
+        """Stop a failed refresh from re-authenticating on every single call.
+
+        A single authenticate() cycle can submit several password logins, so
+        retrying it per API call risks account lockout. Advance the timer so the
+        next attempt waits out the backoff window instead of firing immediately.
+        """
+        now = time.time()
+        if now - self._token_acquired_at < self._refresh_backoff:
+            return
+        self._token_acquired_at = now
 
     def _playback_user_agent(self, endpoint):
         if endpoint == self.playback_endpoint and self.playback_user_agent:

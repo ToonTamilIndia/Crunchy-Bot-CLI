@@ -1,6 +1,7 @@
 import re
 import os
 import traceback
+import threading
 from functools import wraps
 from contextlib import suppress
 import time
@@ -208,15 +209,85 @@ def check_user_tier(tier="regular"):
         return wrapper
     return decorator
 
+# Pyrogram dispatches handlers from a thread pool, so `user_states` and
+# `active_downloads` are read and written concurrently. Every access goes
+# through these helpers under one lock so that check-then-set sequences such as
+# "is this still the confirm_download step?" cannot interleave.
+_state_lock = threading.RLock()
+
+# Users who asked to cancel while a worker thread was mid-download.
+cancelled_users = set()
+
+
+def get_active_download(user_id):
+    with _state_lock:
+        return bool(active_downloads.get(user_id))
+
+
+def begin_active_download(user_id, expected_step):
+    """Atomically move a session from `expected_step` into `downloading`.
+
+    Returns False when another thread already claimed it, so a double-tapped
+    "Start" button cannot launch the same job twice. The slot records the owning
+    session object so a stale worker can tell later whose lock it holds.
+    """
+    with _state_lock:
+        state = user_states.get(user_id)
+        if not state or state.get("step") != expected_step:
+            return False
+        if active_downloads.get(user_id):
+            return False
+        state["step"] = "downloading"
+        active_downloads[user_id] = state
+        cancelled_users.discard(user_id)
+        return True
+
+
+def finish_active_download(user_id, expected_state):
+    """Release only the resources this worker actually owns.
+
+    After /cancel the user can start a new session that reclaims the same
+    `active_downloads` slot. Comparing identity means a straggling worker from
+    the cancelled run leaves the new session's state and guard untouched.
+    """
+    with _state_lock:
+        if expected_state is None:
+            user_states.pop(user_id, None)
+            active_downloads.pop(user_id, None)
+            cancelled_users.discard(user_id)
+            return
+        current = user_states.get(user_id)
+        if current is expected_state:
+            user_states.pop(user_id, None)
+        if active_downloads.get(user_id) is expected_state:
+            active_downloads.pop(user_id, None)
+            cancelled_users.discard(user_id)
+
+
+def request_cancel(user_id):
+    """Flag an in-flight download as cancelled and drop the visible session."""
+    with _state_lock:
+        cancelled_users.add(user_id)
+        state = user_states.pop(user_id, None)
+        active_downloads.pop(user_id, None)
+        return state
+
+
+def is_cancelled(user_id):
+    with _state_lock:
+        return user_id in cancelled_users
+
+
 def check_active_download(func):
     @wraps(func)
     def wrapper(client, update):
         user_id = update.from_user.id
         if isinstance(update, CallbackQuery) and update.data == "cancel":
             return func(client, update)
-        if user_id in sudo_users:
-            return func(client, update)
-        if active_downloads.get(user_id):
+        # Sudo users are not exempt here. This guard exists because two runs for
+        # the same user_id race on identical temp/output paths and delete each
+        # other's files; that is a correctness problem, not a permission one.
+        if get_active_download(user_id):
             if isinstance(update, CallbackQuery):
                 update.answer("Please wait for your previous download to complete.", show_alert=True)
             elif isinstance(update, Message):
@@ -310,14 +381,12 @@ def help_command(client, message: Message):
 @app.on_message(filters.command("cancel"))
 def cancel_command(client, message: Message):
     user_id = message.from_user.id
-    if user_id in user_states:
-        state = user_states.pop(user_id)
+    state = request_cancel(user_id)
+    if state:
         if state.get("message"):
             edit_message(state["message"], "Download process cancelled.")
         else:
             message.reply_text("Download process cancelled.")
-        if user_id in active_downloads:
-            del active_downloads[user_id]
     else:
         message.reply_text("No active download process to cancel.")
 
@@ -567,15 +636,24 @@ def download_command(client, message: Message):
         return
 
     video_url = " ".join(message.command[1:]).strip()
-    status_msg = message.reply_text("Processing URL...")
 
-    user_states[user_id] = {
-        "step": "initial",
-        "url": video_url,
-        "data": {},
-        "message": status_msg,
-        "is_series": False
-    }
+    with _state_lock:
+        existing = user_states.get(user_id)
+        if existing is not None and existing.get("step") != "downloading":
+            # Replacing an in-flight selection would orphan the old status
+            # message and leave its keyboard resolving against the new state.
+            message.reply_text(
+                "You already have a selection in progress. Use /cancel to discard it first."
+            )
+            return
+        user_states[user_id] = {
+            "step": "initial",
+            "url": video_url,
+            "data": {},
+            "message": message.reply_text("Processing URL..."),
+            "is_series": False
+        }
+        status_msg = user_states[user_id]["message"]
 
     process_download_url(client, user_id, video_url, status_msg)
 
@@ -827,9 +905,7 @@ def handle_callback_query(client, query: CallbackQuery):
         if data == "cancel":
             query.answer("Cancelled")
             edit_message(status_msg, "Download process cancelled.")
-            del user_states[user_id]
-            if user_id in active_downloads:
-                del active_downloads[user_id]
+            request_cancel(user_id)
             return
 
         if step == "select_search" and data.startswith("search_"):
@@ -850,7 +926,11 @@ def handle_callback_query(client, query: CallbackQuery):
 
         if step == "select_quality" and data.startswith("quality_"):
             quality_index = int(data.split("_")[1])
-            selected_quality = state["data"]["available_video_qualities"][quality_index]
+            qualities = state["data"].get("available_video_qualities", [])
+            if quality_index < 0 or quality_index >= len(qualities):
+                query.answer("That quality is no longer available.", show_alert=True)
+                return
+            selected_quality = qualities[quality_index]
             state["data"]["selected_video_quality"] = selected_quality
             query.answer(f"Selected: {selected_quality['height']}p")
             ask_audio_language(client, user_id)
@@ -909,7 +989,11 @@ def handle_callback_query(client, query: CallbackQuery):
                 return
             elif data.startswith("sub_"):
                 sub_index = int(data.split("_")[1])
-                track_info = state["data"]["available_subtitle_options"][sub_index]
+                subtitle_options = state["data"].get("available_subtitle_options", [])
+                if sub_index < 0 or sub_index >= len(subtitle_options):
+                    query.answer("That subtitle track is no longer available.", show_alert=True)
+                    return
+                track_info = subtitle_options[sub_index]
 
                 already_selected = False
                 for i, sub in enumerate(state["data"]["selected_subtitles"]):
@@ -950,10 +1034,12 @@ def handle_callback_query(client, query: CallbackQuery):
                 query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
 
         elif step == "confirm_download" and data == "confirm_start":
+            # Claim the transition atomically: a double-tapped button must not
+            # start the same job twice on two worker threads.
+            if not begin_active_download(user_id, "confirm_download"):
+                query.answer("This download has already started.", show_alert=True)
+                return
             query.answer("Starting download...")
-            state["step"] = "downloading"
-            active_downloads[user_id] = True
-
             process_download(client, user_id)
 
     except MessageNotModified:
@@ -964,20 +1050,21 @@ def handle_callback_query(client, query: CallbackQuery):
         print(f"Error in callback query handler for user {user_id}: {e}")
         traceback.print_exc()
         query.answer("An error occurred.", show_alert=True)
-        if user_id in user_states:
-            del user_states[user_id]
-        if user_id in active_downloads:
-            del active_downloads[user_id]
+        # Keep the session so the user can retry from where they were instead of
+        # silently losing every selection they had made. Only release the
+        # concurrency guard, which the handler itself set.
         with suppress(Exception):
-            status_msg.edit_text(f"An error occurred: {e}")
+            active_downloads.pop(user_id, None)
+        with suppress(Exception):
+            status_msg.edit_text(f"An error occurred: {e}\n\nPlease try again.")
 
 
 def process_download(client, user_id):
     state = user_states.get(user_id)
     if not state or state["step"] != "downloading":
         print(f"Error: Invalid state for download process (User: {user_id})")
-        if user_id in active_downloads:
-            del active_downloads[user_id]
+        with suppress(Exception):
+            active_downloads.pop(user_id, None)
         return
 
     status_msg = state["message"]
@@ -994,6 +1081,9 @@ def process_download(client, user_id):
             edit_message(status_msg, f"Starting batch download for '{series_anime_title}' ({total_episodes} episodes)...")
 
             for i, episode_info in enumerate(episodes_to_download):
+                if is_cancelled(user_id):
+                    edit_message(status_msg, "Download cancelled by user.")
+                    return
                 ep_num_str = f"Episode {i+1}/{total_episodes}"
                 ep_id = episode_info['guid']
                 edit_message(status_msg, f"Processing {ep_num_str}: Fetching info...")
@@ -1249,10 +1339,9 @@ def process_download(client, user_id):
         cleanup_files(temp_files if 'temp_files' in locals() else [])
 
     finally:
-        if user_id in user_states:
-            del user_states[user_id]
-        if user_id in active_downloads:
-            del active_downloads[user_id]
+        # Only tear down the session this worker owns. After /cancel the user may
+        # have started a new one; deleting that would strand them mid-flow.
+        finish_active_download(user_id, state)
 
 
 def download_decrypt_merge_single(
@@ -1474,3 +1563,4 @@ if __name__ == "__main__":
     print("Starting bot...")
     app.run()
     print("Bot stopped.")
+

@@ -15,8 +15,30 @@ from crunchyroll import (
     get_episode_title, parse_episode_selection, set_cr_debug,
     get_download_path, get_encrypted_media_path, get_temp_path,
     resolve_encoding_config, EncodingConfig,
+    resolve_batch_subtitles, resolve_batch_audios, resolve_video_quality,
+    dedup_preserving_order,
 )
 from config import *
+
+
+def _force_utf8_console():
+    """Series and episode titles routinely contain non-ASCII text.
+
+    On a legacy Windows console Python binds stdout to the ANSI code page
+    (cp1252/cp437), so printing such a title raises UnicodeEncodeError before any
+    download starts. Reconfigure the streams to UTF-8 where that is supported.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+_force_utf8_console()
 
 
 HELP_TEXT = """Usage: python cli.py [--debug] [--lossy | --lossless | --mode=<mode>]
@@ -456,7 +478,9 @@ else:
         print(f"Invalid episode selection: {error}")
         exit()
     selected_audio_locales = []
+    selected_subtitle_langs = []
     video_quality = 0
+    video_height = None
     subtitle_indices = []
     for download_index, episode_index in enumerate(selected_episode_indices, start=1):
         episode_entry = Episode_List[episode_index]
@@ -477,11 +501,22 @@ else:
             print("Select the video quality:")
             for i, video in enumerate(video_list):
                 print(f"{i + 1}. {video['height']}p, bandwidth: {video['bandwidth']}")
-            video_quality = int(input("Enter the video quality: ")) - 1
+            try:
+                video_quality = int(input("Enter the video quality: ")) - 1
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+                exit()
             if video_quality < 0 or video_quality >= len(video_list):
                 print("Invalid video quality")
                 exit()
-        video = video_list[video_quality]
+            video_height = video_list[video_quality]['height']
+        chosen_available = 0 <= video_quality < len(video_list)
+        video = resolve_video_quality(video_list, video_quality, video_height)
+        if video is None:
+            print("Failed to resolve video renditions for this episode. Skipping.")
+            continue
+        if not chosen_available:
+            print(f"[WARN] Selected quality is unavailable; using {video['height']}p.")
         if aka == 1:
             print("Select the desired audio track:")
             for index, version in enumerate(video_info['versions']):
@@ -489,23 +524,26 @@ else:
 
             print("Note: \n1) The audio quality is automatically set to high quality.\n2) To select multiple audios, enter the numbers separated by commas (e.g., 1, 2, 3).")
             audio_list_input = input("Enter the desired audio(s): ")
-            audio_list = [int(audio_choice.strip()) - 1 for audio_choice in audio_list_input.split(',')]
+            try:
+                audio_list = [int(audio_choice.strip()) - 1 for audio_choice in audio_list_input.split(',')]
+            except ValueError:
+                print("Invalid input. Please enter numbers only.")
+                exit()
             if any(audio_choice < 0 or audio_choice >= len(video_info['versions']) for audio_choice in audio_list):
                 print("Invalid choice(s). Please try again.")
                 exit()    
 
-            selected_audio_locales = [video_info['versions'][audio_choice]['audio_locale'] for audio_choice in audio_list]
-        selected_audios = []
-        for locale in selected_audio_locales:
-            matching_versions = [v for v in video_info['versions'] if v['audio_locale'] == locale]
-            if not matching_versions:
-                print(f"Audio locale {locale} not available in this episode.")
-                exit()
-            version = matching_versions[0]
-            selected_audios.append({
-                'audio_locale': locale_map.get(locale, locale),
-                'guid': version['guid']
-            })
+            selected_audio_locales = dedup_preserving_order(
+                [video_info['versions'][choice]['audio_locale'] for choice in audio_list]
+            )
+        selected_audios, missing_locales = resolve_batch_audios(
+            selected_audio_locales, video_info['versions'], locale_map
+        )
+        for missing in missing_locales:
+            print(f"[WARN] Audio locale {missing} is not available in this episode; skipping it.")
+        if not selected_audios:
+            print("No requested audio track is available for this episode. Skipping.")
+            continue
 
         license_key = CrunchyrollLicense().get_license(pssh, token, id, crunchyroll.token) ["key"]
         for i in license_key:
@@ -559,38 +597,33 @@ else:
                     })      
     
                 if aka == 1:
-                   print("Available subtitle/caption tracks:")
-                   for i, label in enumerate(available_tracks, start=1):
-                       print(f"{i}. {label}")      
+                    print("Available subtitle/caption tracks:")
+                    for i, label in enumerate(available_tracks, start=1):
+                        print(f"{i}. {label}")
 
-                   subtitle_list_input = input("Enter the desired track number(s) (comma-separated for multiple): ")       
+                    subtitle_list_input = input("Enter the desired track number(s) (comma-separated for multiple): ")
 
-                   try:
-                       subtitle_indices = [int(subtitle_choice.strip()) - 1 for subtitle_choice in subtitle_list_input.split(',')]
-                       if any(i < 0 or i >= len(track_info_list) for i in subtitle_indices):
-                           print("Invalid choice(s). Please try again.")
-                           exit() 
-                   except ValueError:
-                          print("Invalid input. Please enter numbers only.")
-                          exit()       
+                    try:
+                        subtitle_indices = [int(c.strip()) - 1 for c in subtitle_list_input.split(',')]
+                        if any(i < 0 or i >= len(track_info_list) for i in subtitle_indices):
+                            print("Invalid choice(s). Please try again.")
+                            exit()
+                    except ValueError:
+                        print("Invalid input. Please enter numbers only.")
+                        exit()
 
-                selected_subtitles = []
-                for i in subtitle_indices:
-                    entry = track_info_list[i]
-                    lang_display = locale_map.get(entry['language'], entry['language']) 
-                    selected_subtitles.append({
-                        'language': lang_display,
-                        'url': entry['url'],
-                        'format': entry['format'],
-                        'type': entry['type']
-                    })      
-    
+            # Track lists differ between episodes, so remember the chosen
+            # languages rather than raw indices and re-resolve them per episode.
+            # Replaying episode 1's indices can IndexError or, worse, silently
+            # mux a different language when two episodes order tracks differently.
+            if aka == 1 and subtitle_indices:
+                selected_subtitle_langs = dedup_preserving_order(
+                    [track_info_list[i]['language'] for i in subtitle_indices]
+                )
 
-                
-
-        else:
-            print("No subtitles available for this video.")         
-            selected_subtitles = False      
+            selected_subtitles = resolve_batch_subtitles(
+                selected_subtitle_langs, track_info_list, locale_map
+            ) or False
     
     
 
@@ -726,3 +759,5 @@ else:
            aka = 0
 
                 
+
+
