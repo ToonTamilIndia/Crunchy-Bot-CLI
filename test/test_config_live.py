@@ -17,6 +17,17 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def read_source(path):
+    """Read a source file preserving line endings.
+
+    pathlib.Path.read_text() only gained the ``newline`` keyword in Python
+    3.13, so calling it that way breaks this module on the 3.11 interpreter
+    this project targets. Plain open() works on every version.
+    """
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        return handle.read()
 sys.path.insert(0, str(REPO))
 
 MODULES = ("cli.py", "tg.py", "crunchyroll.py")
@@ -49,7 +60,7 @@ class TestLiveConfigReads(unittest.TestCase):
     def test_no_star_import_of_config(self):
         for module in MODULES:
             with self.subTest(module=module):
-                tree = ast.parse((REPO / module).read_text(encoding="utf-8", newline="")
+                tree = ast.parse(read_source(REPO / module)
                                  .replace("\r\n", "\n"))
                 for node in ast.walk(tree):
                     if isinstance(node, ast.ImportFrom) and node.module == "config":
@@ -61,7 +72,7 @@ class TestLiveConfigReads(unittest.TestCase):
         settings = config_settings()
         for module in MODULES:
             with self.subTest(module=module):
-                tree = ast.parse((REPO / module).read_text(encoding="utf-8", newline="")
+                tree = ast.parse(read_source(REPO / module)
                                  .replace("\r\n", "\n"))
                 shadowed = set()
                 for node in ast.walk(tree):
@@ -81,7 +92,7 @@ class TestLiveConfigReads(unittest.TestCase):
         """The stale half of the output-format split must be gone."""
         for module in ("cli.py", "tg.py"):
             with self.subTest(module=module):
-                source = (REPO / module).read_text(encoding="utf-8", newline="")
+                source = read_source(REPO / module)
                 self.assertRegex(source, r"""config_value\(\s*['\"]output_format['\"]\s*\)""")
 
 
@@ -114,7 +125,7 @@ class TestPython311Compatibility(unittest.TestCase):
         pattern = __import__("re").compile(r"""f(["'])(?:[^\\]|\\.)*?\1""", __import__("re").DOTALL)
         for module in MODULES:
             with self.subTest(module=module):
-                text = (REPO / module).read_text(encoding="utf-8", newline="")
+                text = read_source(REPO / module)
                 bad = [(i, l.strip()) for i, l in enumerate(text.replace("\r\n", "\n").split("\n"), 1)
                        if any(pattern.search(l) and _nested_same_quote(l) for l in [l])]
                 self.assertEqual(bad, [], f"{module} uses a 3.12-only nested same-quote f-string: {bad}")

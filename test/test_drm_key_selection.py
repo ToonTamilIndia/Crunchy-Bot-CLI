@@ -30,6 +30,17 @@ from crunchyroll import (
 )
 
 NS = "urn:mpeg:dash:schema:mpd:2011"
+
+
+def read_source(path):
+    """Read a source file preserving line endings.
+
+    pathlib.Path.read_text() only gained the ``newline`` keyword in Python
+    3.13, so calling it that way breaks this module on the 3.11 interpreter
+    this project targets. Plain open() works on every version.
+    """
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        return handle.read()
 CENC = "urn:mpeg:cenc:2013"
 
 VIDEO_KID = "d2b1dbc41da7402d88de5dba577def74"
@@ -287,7 +298,7 @@ class TestCliCallSitesPassAKid(unittest.TestCase):
         from pathlib import Path
 
         cli = Path(__file__).resolve().parent.parent / "cli.py"
-        tree = ast.parse(cli.read_text(encoding="utf-8", newline="").replace("\r\n", "\n"))
+        tree = ast.parse(read_source(cli).replace("\r\n", "\n"))
         calls = [n for n in ast.walk(tree)
                  if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Name)

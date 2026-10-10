@@ -11,6 +11,17 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def read_source(path):
+    """Read a source file preserving line endings.
+
+    pathlib.Path.read_text() only gained the ``newline`` keyword in Python
+    3.13, so calling it that way breaks this module on the 3.11 interpreter
+    this project targets. Plain open() works on every version.
+    """
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        return handle.read()
 SCRIPTS = ("cli.py", "tg.py", "crunchyroll.py", "platform_tools.py", "config.py")
 
 # f"...{ ... " ... " ... }..." -- the inner quote matches the f-string delimiter.
@@ -60,7 +71,7 @@ class TestPython311CompatibleSyntax(unittest.TestCase):
         import ast
         for script in SCRIPTS:
             with self.subTest(script=script):
-                ast.parse((REPO / script).read_text(encoding="utf-8", newline="")
+                ast.parse(read_source(REPO / script)
                           .replace("\r\n", "\n"))
 
 

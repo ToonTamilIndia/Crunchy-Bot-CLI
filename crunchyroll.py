@@ -1105,24 +1105,36 @@ def parse_mpd_content(mpd_content):
 def get_track_kid(element):
     """The default_KID for a Representation, falling back to its AdaptationSet.
 
-    Crunchyroll namespaces the attribute, and the key can sit on either the
-    Representation or the parent AdaptationSet, so match on the local name.
+    Crunchyroll namespaces the attribute, and the key can sit either directly on
+    the AdaptationSet/Representation or on a cenc:ContentProtection child, so
+    match on the local name.
+
+    Two traps this avoids:
+      - Only *direct* children are inspected. Walking the whole AdaptationSet
+        subtree with iter() reaches sibling Representations, so a clear
+        rendition would silently inherit a protected sibling's key ID and then
+        be handed a key it does not need.
+      - lxml exposes comments and processing instructions as nodes whose .tag
+        is a callable, not a string, so .tag.endswith() raises AttributeError.
+        A perfectly valid comment inside an MPD must not abort the parse.
     """
     scopes = [element]
     parent = element.getparent()
-    if parent is not None:
+    if parent is not None and isinstance(parent.tag, str):
         scopes.append(parent)
 
     for scope in scopes:
-        # The attribute may sit directly on the AdaptationSet/Representation...
+        # The attribute may sit directly on the AdaptationSet/Representation.
         for attr, value in scope.attrib.items():
             if attr.split("}")[-1].lower() == "default_kid":
                 kid = re.sub(r"[^0-9a-f]", "", value.lower())
                 if len(kid) == 32:
                     return kid
-        # ...or on a nested cenc:ContentProtection element.
-        for node in scope.iter():
-            if not node.tag.endswith("ContentProtection"):
+        # ...or on a ContentProtection declared directly by this scope.
+        for node in scope:
+            if not isinstance(node.tag, str):
+                continue  # comment / processing instruction
+            if node.tag.split("}")[-1] != "ContentProtection":
                 continue
             for attr, value in node.attrib.items():
                 if attr.split("}")[-1].lower() == "default_kid":
@@ -2780,6 +2792,7 @@ def find_guid_by_locale(data, locale):
         if audio_locale == "en-US":
             en_us_guid = guid
     return en_us_guid
+
 
 
 
