@@ -85,10 +85,20 @@ class TestCustomTitleSettingName(unittest.TestCase):
         self.assertIn("Custom_Title", config_names())
 
     def test_scripts_reference_the_defined_name(self):
+        """Either a direct read or a live config_value read, never `custom_title`."""
         for script in SCRIPTS:
             with self.subTest(script=script):
-                self.assertNotIn("custom_title.format(", source(script))
-                self.assertIn("Custom_Title.format(", source(script))
+                tree = ast.parse(source(script))
+                names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+                # `use_custom_title` is a different setting, so match whole names.
+                self.assertNotIn("custom_title", names)
+                # The setting is now read through the live accessor, so it appears
+                # as a string argument rather than a bare Name.
+                self.assertRegex(
+                    source(script),
+                    r"""config_value\(\s*['"]Custom_Title['"]\s*\)""",
+                    f"{script} no longer reads Custom_Title through config_value",
+                )
 
 
 class TestEpNumStrIsBound(unittest.TestCase):

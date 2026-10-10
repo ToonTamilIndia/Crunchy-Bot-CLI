@@ -9,6 +9,7 @@ were just granted. These tests pin the dynamic replacement.
 
 import unittest
 
+import config
 import tg
 
 
@@ -19,19 +20,19 @@ class FakeMessage:
 
 class TestSudoFilterIsDynamic(unittest.TestCase):
     def setUp(self):
-        self._saved = (list(tg.sudo_users), list(tg.premium_users))
-        tg.sudo_users.clear()
-        tg.premium_users.clear()
+        self._saved = (list(config.sudo_users), list(config.premium_users))
+        config.sudo_users.clear()
+        config.premium_users.clear()
 
     def tearDown(self):
-        tg.sudo_users[:] = self._saved[0]
-        tg.premium_users[:] = self._saved[1]
+        config.sudo_users[:] = self._saved[0]
+        config.premium_users[:] = self._saved[1]
 
     def test_newly_added_sudo_user_becomes_privileged(self):
         """The bug: /addsudo appended, but the decorator never saw it."""
         self.assertFalse(tg.is_sudo_user(999))
 
-        tg.sudo_users.append(999)          # what /addsudo does
+        config.sudo_users.append(999)          # what /addsudo does
 
         self.assertTrue(tg.is_sudo_user(999), "in-list check must see the addition")
 
@@ -43,13 +44,13 @@ class TestSudoFilterIsDynamic(unittest.TestCase):
                         "filters.user(sudo_users) would still reject user 999")
 
     def test_non_sudo_user_is_still_rejected(self):
-        tg.sudo_users.append(999)
+        config.sudo_users.append(999)
         self.assertFalse(tg.is_sudo(None, FakeMessage(1000)))
 
     def test_removed_sudo_user_loses_privilege(self):
-        tg.sudo_users.append(999)
+        config.sudo_users.append(999)
         self.assertTrue(tg.is_sudo(None, FakeMessage(999)))
-        tg.sudo_users.remove(999)
+        config.sudo_users.remove(999)
         self.assertFalse(tg.is_sudo(None, FakeMessage(999)))
 
     def test_frozen_filters_are_not_used_for_privilege(self):
@@ -61,31 +62,30 @@ class TestSudoFilterIsDynamic(unittest.TestCase):
 
 class TestPremiumFilterIsDynamic(unittest.TestCase):
     def setUp(self):
-        self._saved = list(tg.premium_users)
-        tg.premium_users.clear()
+        self._saved = list(config.premium_users)
+        config.premium_users.clear()
 
     def tearDown(self):
-        tg.premium_users[:] = self._saved
+        config.premium_users[:] = self._saved
 
     def test_premium_added_at_runtime_is_honoured(self):
         self.assertFalse(tg.is_premium_user(555))
-        tg.premium_users.append(555)
+        config.premium_users.append(555)
         self.assertTrue(tg.is_premium(None, FakeMessage(555)))
 
 
 class TestUserLimits(unittest.TestCase):
     def setUp(self):
-        self._saved = (list(tg.sudo_users), list(tg.premium_users))
-        tg.sudo_users.clear()
-        tg.premium_users.clear()
+        self._saved = (list(config.sudo_users), list(config.premium_users))
+        config.sudo_users.clear()
+        config.premium_users.clear()
 
     def tearDown(self):
-        tg.sudo_users[:] = self._saved[0]
-        tg.premium_users[:] = self._saved[1]
+        config.sudo_users[:] = self._saved[0]
+        config.premium_users[:] = self._saved[1]
 
     def test_limits_are_numbers_comparable_to_an_int_height(self):
         """A quoted limit must not raise TypeError against an int quality."""
-        import config
         original = config.REGULAR_USER_VIDEO_LIMIT_P
         try:
             config.REGULAR_USER_VIDEO_LIMIT_P = "480"
@@ -99,8 +99,8 @@ class TestUserLimits(unittest.TestCase):
 
     def test_sudo_and_premium_get_unlimited(self):
         inf = float("inf")
-        tg.sudo_users.append(1)
-        tg.premium_users.append(2)
+        config.sudo_users.append(1)
+        config.premium_users.append(2)
         self.assertEqual(tg.get_user_limits(1), (inf, inf))
         self.assertEqual(tg.get_user_limits(2), (inf, inf))
 

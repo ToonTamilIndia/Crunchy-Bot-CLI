@@ -20,13 +20,52 @@ from crunchyroll import (
     get_encrypted_media_path, get_temp_path,
     resolve_encoding_config, EncodingConfig,
 )
-from config import *
 
 from pyrogram import Client, filters, enums
 from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 )
 from pyrogram.errors import MessageNotModified, QueryIdInvalid
+
+def config_value(name, default=None):
+    """Read a setting live from config, falling back to the import snapshot."""
+    try:
+        import config as _config
+        if hasattr(_config, name):
+            return getattr(_config, name)
+    except Exception:
+        pass
+    return globals().get(name, default)
+
+
+def as_bool(value, default=False):
+    """Coerce a config value to a bool.
+
+    `use_watermark = "False"` is a truthy string, which would silently switch
+    the watermark on, so spell the string values out explicitly.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off", ""):
+            return False
+        return default
+    return bool(value)
+
+
+def as_int(value, default):
+    """Coerce a config value to int, tolerating a quoted number."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
 
 
 try:
@@ -38,7 +77,7 @@ except Exception as e:
     exit(1)
 
 
-app = Client("crunchyroll_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("crunchyroll_bot", api_id=config_value("API_ID"), api_hash=config_value("API_HASH"), bot_token=config_value("BOT_TOKEN"))
 
 class tgUploader:
     def __init__(self, app, msg):
@@ -192,9 +231,9 @@ def check_user_tier(tier="regular"):
         def wrapper(client, update):
             user_id = update.from_user.id
             allowed = False
-            if tier == "sudo" and user_id in sudo_users:
+            if tier == "sudo" and user_id in config_value("sudo_users"):
                 allowed = True
-            elif tier == "premium" and (user_id in sudo_users or user_id in premium_users):
+            elif tier == "premium" and (user_id in config_value("sudo_users") or user_id in config_value("premium_users")):
                 allowed = True
             elif tier == "regular":
                 allowed = True
@@ -221,7 +260,7 @@ cancelled_users = set()
 
 def get_active_download(user_id):
     with _state_lock:
-        return bool(active_downloads.get(user_id))
+        return bool(config_value("active_downloads").get(user_id))
 
 
 def begin_active_download(user_id, expected_step):
@@ -232,13 +271,13 @@ def begin_active_download(user_id, expected_step):
     session object so a stale worker can tell later whose lock it holds.
     """
     with _state_lock:
-        state = user_states.get(user_id)
+        state = config_value("user_states").get(user_id)
         if not state or state.get("step") != expected_step:
             return False
-        if active_downloads.get(user_id):
+        if config_value("active_downloads").get(user_id):
             return False
         state["step"] = "downloading"
-        active_downloads[user_id] = state
+        config_value("active_downloads")[user_id] = state
         cancelled_users.discard(user_id)
         return True
 
@@ -252,15 +291,15 @@ def finish_active_download(user_id, expected_state):
     """
     with _state_lock:
         if expected_state is None:
-            user_states.pop(user_id, None)
-            active_downloads.pop(user_id, None)
+            config_value("user_states").pop(user_id, None)
+            config_value("active_downloads").pop(user_id, None)
             cancelled_users.discard(user_id)
             return
-        current = user_states.get(user_id)
+        current = config_value("user_states").get(user_id)
         if current is expected_state:
-            user_states.pop(user_id, None)
-        if active_downloads.get(user_id) is expected_state:
-            active_downloads.pop(user_id, None)
+            config_value("user_states").pop(user_id, None)
+        if config_value("active_downloads").get(user_id) is expected_state:
+            config_value("active_downloads").pop(user_id, None)
             cancelled_users.discard(user_id)
 
 
@@ -268,8 +307,8 @@ def request_cancel(user_id):
     """Flag an in-flight download as cancelled and drop the visible session."""
     with _state_lock:
         cancelled_users.add(user_id)
-        state = user_states.pop(user_id, None)
-        active_downloads.pop(user_id, None)
+        state = config_value("user_states").pop(user_id, None)
+        config_value("active_downloads").pop(user_id, None)
         return state
 
 
@@ -306,53 +345,13 @@ def edit_message(message: Message, text: str, keyboard: InlineKeyboardMarkup = N
     with suppress(MessageNotModified, QueryIdInvalid):
         message.edit_text(text, reply_markup=keyboard, parse_mode=enums.ParseMode.MARKDOWN)
 
-def config_value(name, default=None):
-    """Read a setting live from config, falling back to the import snapshot."""
-    try:
-        import config as _config
-        if hasattr(_config, name):
-            return getattr(_config, name)
-    except Exception:
-        pass
-    return globals().get(name, default)
-
-
-def as_bool(value, default=False):
-    """Coerce a config value to a bool.
-
-    `use_watermark = "False"` is a truthy string, which would silently switch
-    the watermark on, so spell the string values out explicitly.
-    """
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in ("1", "true", "yes", "on"):
-            return True
-        if text in ("0", "false", "no", "off", ""):
-            return False
-        return default
-    return bool(value)
-
-
-def as_int(value, default):
-    """Coerce a config value to int, tolerating a quoted number."""
-    if value is None or value == "":
-        return default
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
-
 
 def is_sudo_user(user_id):
-    return user_id in sudo_users
+    return user_id in config_value("sudo_users")
 
 
 def is_premium_user(user_id):
-    return user_id in premium_users
+    return user_id in config_value("premium_users")
 
 
 # pyrogram's filters.user() copies its argument into a set when the filter is
@@ -453,8 +452,8 @@ def cancel_command(client, message: Message):
 def add_premium(client, message: Message):
     try:
         user_id_to_add = int(message.text.split(maxsplit=1)[1])
-        if user_id_to_add not in premium_users:
-            premium_users.append(user_id_to_add)
+        if user_id_to_add not in config_value("premium_users"):
+            config_value("premium_users").append(user_id_to_add)
             message.reply_text(f"User `{user_id_to_add}` added to premium users.")
         else:
             message.reply_text("User is already premium.")
@@ -467,8 +466,8 @@ def add_premium(client, message: Message):
 def rem_premium(client, message: Message):
     try:
         user_id_to_rem = int(message.text.split(maxsplit=1)[1])
-        if user_id_to_rem in premium_users:
-            premium_users.remove(user_id_to_rem)
+        if user_id_to_rem in config_value("premium_users"):
+            config_value("premium_users").remove(user_id_to_rem)
             message.reply_text(f"User `{user_id_to_rem}` removed from premium users.")
         else:
             message.reply_text("User is not in the premium list.")
@@ -479,17 +478,17 @@ def rem_premium(client, message: Message):
 
 @app.on_message(filters.command("listpremium") & is_sudo)
 def list_premium(client, message: Message):
-    if not premium_users:
+    if not config_value("premium_users"):
         message.reply_text("The premium user list is empty.")
     else:
-        message.reply_text("Premium Users:\n" + "\n".join(f"- `{uid}`" for uid in premium_users))
+        message.reply_text("Premium Users:\n" + "\n".join(f"- `{uid}`" for uid in config_value("premium_users")))
 
 @app.on_message(filters.command("addsudo") & is_sudo)
 def add_sudo(client, message: Message):
     try:
         user_id_to_add = int(message.text.split(maxsplit=1)[1])
-        if user_id_to_add not in sudo_users:
-            sudo_users.append(user_id_to_add)
+        if user_id_to_add not in config_value("sudo_users"):
+            config_value("sudo_users").append(user_id_to_add)
             message.reply_text(f"User `{user_id_to_add}` added to sudo users.")
         else:
             message.reply_text("User is already sudo.")
@@ -505,8 +504,8 @@ def rem_sudo(client, message: Message):
         if user_id_to_rem == message.from_user.id:
             message.reply_text("You cannot remove yourself from the sudo list.")
             return
-        if user_id_to_rem in sudo_users:
-            sudo_users.remove(user_id_to_rem)
+        if user_id_to_rem in config_value("sudo_users"):
+            config_value("sudo_users").remove(user_id_to_rem)
             message.reply_text(f"User `{user_id_to_rem}` removed from sudo users.")
         else:
             message.reply_text("User is not in the sudo list.")
@@ -517,10 +516,10 @@ def rem_sudo(client, message: Message):
 
 @app.on_message(filters.command("listsudo") & is_sudo)
 def list_sudo(client, message: Message):
-    if not sudo_users:
+    if not config_value("sudo_users"):
         message.reply_text("The sudo user list is empty. This shouldn't happen!")
     else:
-        message.reply_text("Sudo Users:\n" + "\n".join(f"- `{uid}`" for uid in sudo_users))
+        message.reply_text("Sudo Users:\n" + "\n".join(f"- `{uid}`" for uid in config_value("sudo_users")))
 
 
 def search_button_label(result):
@@ -535,11 +534,11 @@ def show_search_results(client, user_id, query_text, status_msg):
     search_results = crunchyroll.search(query_text, limit=5)
     if not search_results:
         edit_message(status_msg, "No Crunchyroll search results found.")
-        if user_id in user_states:
-            del user_states[user_id]
+        if user_id in config_value("user_states"):
+            del config_value("user_states")[user_id]
         return
 
-    state = user_states[user_id]
+    state = config_value("user_states")[user_id]
     state["step"] = "select_search"
     state["data"]["search_results"] = search_results
 
@@ -562,7 +561,7 @@ def process_download_url(client, user_id, video_url, status_msg):
             match = re.search(r'"?https?://www\.crunchyroll\.com/(?:watch)/([^/?"\']+)', video_url)
             if not match:
                 edit_message(status_msg, "Invalid episode URL format.")
-                del user_states[user_id]
+                del config_value("user_states")[user_id]
                 return
             content_id = match.group(1)
 
@@ -571,44 +570,44 @@ def process_download_url(client, user_id, video_url, status_msg):
             if not video_info:
                 reason = crunchyroll.last_playback_error or "video not found or not accessible"
                 edit_message(status_msg, f"Video not accessible: {reason}")
-                del user_states[user_id]
+                del config_value("user_states")[user_id]
                 return
 
-            user_states[user_id]["data"]["video_info"] = video_info
-            user_states[user_id]["data"]["id"] = content_id
-            user_states[user_id]["is_series"] = False
+            config_value("user_states")[user_id]["data"]["video_info"] = video_info
+            config_value("user_states")[user_id]["data"]["id"] = content_id
+            config_value("user_states")[user_id]["is_series"] = False
 
             pssh, mpd_content, token = crunchyroll.get_pssh(video_info)
             if not mpd_content:
                 edit_message(status_msg, "Could not fetch MPD content.")
-                del user_states[user_id]
+                del config_value("user_states")[user_id]
                 return
 
-            user_states[user_id]["data"]["pssh"] = pssh
-            user_states[user_id]["data"]["mpd_content"] = mpd_content
-            user_states[user_id]["data"]["drm_token"] = token
+            config_value("user_states")[user_id]["data"]["pssh"] = pssh
+            config_value("user_states")[user_id]["data"]["mpd_content"] = mpd_content
+            config_value("user_states")[user_id]["data"]["drm_token"] = token
 
             video_list, _ = parse_mpd_content(mpd_content)
             if not video_list:
                 edit_message(status_msg, "No video streams found in MPD.")
-                del user_states[user_id]
+                del config_value("user_states")[user_id]
                 return
 
-            user_states[user_id]["data"]["available_video_qualities"] = video_list
+            config_value("user_states")[user_id]["data"]["available_video_qualities"] = video_list
             ask_video_quality(client, user_id)
 
         elif "crunchyroll.com" in video_url and "/series/" in video_url:
             match = re.search(r'"?https?://www\.crunchyroll\.com/(?:series)/([^/?"\']+)', video_url)
             if not match:
                 edit_message(status_msg, "Invalid series URL format.")
-                del user_states[user_id]
+                del config_value("user_states")[user_id]
                 return
 
             edit_message(status_msg, "Fetching series information...")
             series_data, series_info = crunchyroll.get_content_info(url=video_url)
             if not series_data or 'data' not in series_data or not series_data['data']:
                 edit_message(status_msg, "Series not found or no episodes available.")
-                del user_states[user_id]
+                del config_value("user_states")[user_id]
                 return
 
             episodes = [
@@ -633,12 +632,12 @@ def process_download_url(client, user_id, video_url, status_msg):
             if len(episodes) > 15:
                 preview_lines.append(f"... and {len(episodes) - 15} more")
 
-            user_states[user_id]["data"]["episodes"] = episodes
-            user_states[user_id]["data"]["series_title"] = series_title
-            user_states[user_id]["is_series"] = True
-            user_states[user_id]["data"]["total_episodes"] = len(episodes)
+            config_value("user_states")[user_id]["data"]["episodes"] = episodes
+            config_value("user_states")[user_id]["data"]["series_title"] = series_title
+            config_value("user_states")[user_id]["is_series"] = True
+            config_value("user_states")[user_id]["data"]["total_episodes"] = len(episodes)
 
-            user_states[user_id]["step"] = "ask_episode_count"
+            config_value("user_states")[user_id]["step"] = "ask_episode_count"
             edit_message(
                 status_msg,
                 f"Found series '{series_title}' with {len(episodes)} episodes.\n"
@@ -654,8 +653,8 @@ def process_download_url(client, user_id, video_url, status_msg):
         print(f"Error during initial processing for user {user_id}: {e}")
         traceback.print_exc()
         edit_message(status_msg, f"An error occurred: {e}")
-        if user_id in user_states:
-            del user_states[user_id]
+        if user_id in config_value("user_states"):
+            del config_value("user_states")[user_id]
 
 
 @app.on_message(filters.command(["download", "dl"]) & DOWNLOAD_ACCESS_FILTER)
@@ -663,8 +662,8 @@ def process_download_url(client, user_id, video_url, status_msg):
 def download_command(client, message: Message):
     user_id = message.from_user.id
     global crunchyroll, license_handler, vid_token
-    if use_account and Email and Password:
-        vid_token = auth.get_user_token(Email, Password, allow_guest_fallback=False)
+    if config_value("use_account") and config_value("Email") and config_value("Password"):
+        vid_token = auth.get_user_token(config_value("Email"), config_value("Password"), allow_guest_fallback=False)
         if not vid_token:
             message.reply_text(
                 f"Crunchyroll account login failed: `{auth.last_auth_error or 'unknown error'}`\n"
@@ -682,8 +681,8 @@ def download_command(client, message: Message):
         playback_endpoint=auth.playback_endpoint,
         playback_user_agent=auth.playback_user_agent,
         auth_instance=auth,
-        email=Email if use_account else None,
-        password=Password if use_account else None,
+        email=config_value("Email") if config_value("use_account") else None,
+        password=config_value("Password") if config_value("use_account") else None,
     )
     license_handler = CrunchyrollLicense()
     print("Crunchyroll token ready.")
@@ -697,7 +696,7 @@ def download_command(client, message: Message):
     video_url = " ".join(message.command[1:]).strip()
 
     with _state_lock:
-        existing = user_states.get(user_id)
+        existing = config_value("user_states").get(user_id)
         if existing is not None and existing.get("step") != "downloading":
             # Replacing an in-flight selection would orphan the old status
             # message and leave its keyboard resolving against the new state.
@@ -705,14 +704,14 @@ def download_command(client, message: Message):
                 "You already have a selection in progress. Use /cancel to discard it first."
             )
             return
-        user_states[user_id] = {
+        config_value("user_states")[user_id] = {
             "step": "initial",
             "url": video_url,
             "data": {},
             "message": message.reply_text("Processing URL..."),
             "is_series": False
         }
-        status_msg = user_states[user_id]["message"]
+        status_msg = config_value("user_states")[user_id]["message"]
 
     process_download_url(client, user_id, video_url, status_msg)
 
@@ -724,8 +723,8 @@ def download_command(client, message: Message):
 ]) & filters.private)
 def handle_text_reply(client, message: Message):
     user_id = message.from_user.id
-    if user_id in user_states and user_states[user_id]["step"] == "ask_episode_count":
-        state = user_states[user_id]
+    if user_id in config_value("user_states") and config_value("user_states")[user_id]["step"] == "ask_episode_count":
+        state = config_value("user_states")[user_id]
         status_msg = state["message"]
         try:
             total_episodes = state["data"]["total_episodes"]
@@ -753,13 +752,13 @@ def handle_text_reply(client, message: Message):
                     status_msg,
                     "Selected episodes are not accessible with the current token. Premium account access may be required."
                 )
-                del user_states[user_id]
+                del config_value("user_states")[user_id]
                 return
 
             video_list, _ = parse_mpd_content(mpd_content)
             if not video_list:
                 edit_message(status_msg, "No video streams found for the selected episodes.")
-                del user_states[user_id]
+                del config_value("user_states")[user_id]
                 return
 
             state["data"]["video_info"] = video_info
@@ -775,13 +774,13 @@ def handle_text_reply(client, message: Message):
             print(f"Error processing episode count for user {user_id}: {e}")
             traceback.print_exc()
             edit_message(status_msg, f"An error occurred: {e}")
-            del user_states[user_id]
+            del config_value("user_states")[user_id]
 
 
 def ask_video_quality(client, user_id):
-    if user_id not in user_states:
+    if user_id not in config_value("user_states"):
         return
-    state = user_states[user_id]
+    state = config_value("user_states")[user_id]
     status_msg = state["message"]
 
     video_list = state["data"]["available_video_qualities"]
@@ -796,7 +795,7 @@ def ask_video_quality(client, user_id):
 
     if not buttons:
         edit_message(status_msg, "No video qualities available within your limits.")
-        del user_states[user_id]
+        del config_value("user_states")[user_id]
         return
 
     buttons.append([InlineKeyboardButton("Cancel", callback_data="cancel")])
@@ -806,9 +805,9 @@ def ask_video_quality(client, user_id):
 
 
 def ask_audio_language(client, user_id):
-    if user_id not in user_states:
+    if user_id not in config_value("user_states"):
         return
-    state = user_states[user_id]
+    state = config_value("user_states")[user_id]
     status_msg = state["message"]
     video_info = state["data"]["video_info"]
 
@@ -826,7 +825,7 @@ def ask_audio_language(client, user_id):
     for index, version in enumerate(video_info['versions']):
         locale = version['audio_locale']
         guid = version['guid']
-        lang_name = locale_map.get(locale, locale)
+        lang_name = config_value("locale_map").get(locale, locale)
         audio_options[guid] = locale
         buttons.append([InlineKeyboardButton(lang_name, callback_data=f"audio_{guid}")])
 
@@ -846,9 +845,9 @@ def ask_audio_language(client, user_id):
 
 
 def ask_subtitles(client, user_id):
-    if user_id not in user_states:
+    if user_id not in config_value("user_states"):
         return
-    state = user_states[user_id]
+    state = config_value("user_states")[user_id]
     status_msg = state["message"]
     video_info = state["data"]["video_info"]
     available_tracks = []
@@ -858,7 +857,7 @@ def ask_subtitles(client, user_id):
         if lang == "none" or 'url' not in data or not data['url']:
             return
         label_prefix = "[CC]" if track_type == 'caption' else "[SUB]"
-        lang_display = locale_map.get(lang, lang)
+        lang_display = config_value("locale_map").get(lang, lang)
         label = f"{label_prefix} {lang_display}"
         available_tracks.append(label)
         track_info_list.append({
@@ -906,9 +905,9 @@ def ask_subtitles(client, user_id):
 
 def confirm_download(client, user_id):
     """Shows final selections and asks for confirmation."""
-    if user_id not in user_states:
+    if user_id not in config_value("user_states"):
         return
-    state = user_states[user_id]
+    state = config_value("user_states")[user_id]
     status_msg = state["message"]
 
     sel_quality = state["data"]["selected_video_quality"]
@@ -950,13 +949,13 @@ def handle_callback_query(client, query: CallbackQuery):
     user_id = query.from_user.id
     data = query.data
 
-    if user_id not in user_states:
+    if user_id not in config_value("user_states"):
         query.answer("Session expired or invalid state. Please start again with /download.", show_alert=True)
         with suppress(Exception):
             query.message.delete()
         return
 
-    state = user_states[user_id]
+    state = config_value("user_states")[user_id]
     status_msg = state["message"]
     step = state["step"]
 
@@ -1007,7 +1006,7 @@ def handle_callback_query(client, query: CallbackQuery):
 
             elif data.startswith("audio_"):
                 guid = data.split("_")[1]
-                locale_name = locale_map.get(state["data"]["available_audio_options"][guid], state["data"]["available_audio_options"][guid])
+                locale_name = config_value("locale_map").get(state["data"]["available_audio_options"][guid], state["data"]["available_audio_options"][guid])
 
                 already_selected = False
                 for i, audio in enumerate(state["data"]["selected_audios"]):
@@ -1030,7 +1029,7 @@ def handle_callback_query(client, query: CallbackQuery):
                 selected_guids = {a['guid'] for a in state["data"]["selected_audios"]}
 
                 for btn_guid, btn_locale in state["data"]["available_audio_options"].items():
-                    btn_lang_name = locale_map.get(btn_locale, btn_locale)
+                    btn_lang_name = config_value("locale_map").get(btn_locale, btn_locale)
                     prefix = "✅ " if btn_guid in selected_guids else ""
                     buttons.append([InlineKeyboardButton(f"{prefix}{btn_lang_name}", callback_data=f"audio_{btn_guid}")])
 
@@ -1113,17 +1112,17 @@ def handle_callback_query(client, query: CallbackQuery):
         # silently losing every selection they had made. Only release the
         # concurrency guard, which the handler itself set.
         with suppress(Exception):
-            active_downloads.pop(user_id, None)
+            config_value("active_downloads").pop(user_id, None)
         with suppress(Exception):
             status_msg.edit_text(f"An error occurred: {e}\n\nPlease try again.")
 
 
 def process_download(client, user_id):
-    state = user_states.get(user_id)
+    state = config_value("user_states").get(user_id)
     if not state or state["step"] != "downloading":
         print(f"Error: Invalid state for download process (User: {user_id})")
         with suppress(Exception):
-            active_downloads.pop(user_id, None)
+            config_value("active_downloads").pop(user_id, None)
         return
 
     status_msg = state["message"]
@@ -1182,7 +1181,7 @@ def process_download(client, user_id):
                     target_guid = None
 
                     for version in video_info.get('versions', []):
-                        if locale_map.get(version.get('audio_locale'), version.get('audio_locale')) == selected_audio['audio_locale']:
+                        if config_value("locale_map").get(version.get('audio_locale'), version.get('audio_locale')) == selected_audio['audio_locale']:
                             target_guid = version.get('guid')
                             break
 
@@ -1260,9 +1259,9 @@ def process_download(client, user_id):
                     base_anime_title = re.sub(r"\s*\([^)]*\)", "", ep_meta["season_title"])
 
                 title = f"{base_anime_title}.S{season_num}E{ep_num}-{ep_title_str}"
-                if use_custom_title:
+                if config_value("use_custom_title"):
                     try:
-                        title = Custom_Title.format(
+                        title = config_value("Custom_Title").format(
                             Title=base_anime_title,
                             Episode=ep_num,
                             Season=season_num,
@@ -1365,9 +1364,9 @@ def process_download(client, user_id):
             ep_title_str = ep_info["title"]
 
             title = f"{anime}.S{season_num}E{ep_num}-{ep_title_str}"
-            if use_custom_title:
+            if config_value("use_custom_title"):
                 try:
-                    title = Custom_Title.format(Title=anime, Episode=ep_num, Season=season_num, EpTitle=ep_title_str)
+                    title = config_value("Custom_Title").format(Title=anime, Episode=ep_num, Season=season_num, EpTitle=ep_title_str)
                 except AttributeError:
                     pass
                 except KeyError:
@@ -1489,14 +1488,14 @@ def download_decrypt_merge_single(
                 print(f"Warning: Audio decryption failed for {locale}: {stderr}. Skipping audio track.")
                 continue
 
-            audio_files.append({'path': dec_audio_path, 'lang': locale_map.get(locale), 'title_lang': locale})
+            audio_files.append({'path': dec_audio_path, 'lang': config_value("locale_map").get(locale), 'title_lang': locale})
             temp_files.append(dec_audio_path)
             edit_message(status_msg, f"{progress_prefix}Audio '{locale}' decryption complete.")
 
         edit_message(status_msg, f"{progress_prefix}Merging files...")
 
         ffmpeg_cmd_list = [
-            resolve_executable("ffmpeg", ffmpeg_path),
+            resolve_executable("ffmpeg", config_value("ffmpeg_path")),
             "-nostdin",
             "-y",
             "-i", dec_video_path
@@ -1523,7 +1522,7 @@ def download_decrypt_merge_single(
         for i, audio in enumerate(audio_files):
             stream_index = i + 1
             map_commands.extend(["-map", f"{stream_index}:a?"])
-            lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(audio['title_lang'], audio['title_lang']) if audio['title_lang'] else "und"
+            lang_code = config_value("LANGUAGE_NAME_TO_ISO639_2B").get(audio['title_lang'], audio['title_lang']) if audio['title_lang'] else "und"
             title_lang = audio['title_lang']
             output_audio_langs.append(title_lang)
             if encoding_cfg.use_watermark:
@@ -1541,7 +1540,7 @@ def download_decrypt_merge_single(
         for i, sub in enumerate(subtitle_files):
             stream_index = len(audio_files) + i + 1
             map_commands.extend(["-map", f"{stream_index}:s?"])
-            lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(sub['title_lang'], sub['title_lang']) if sub['title_lang'] else "und"
+            lang_code = config_value("LANGUAGE_NAME_TO_ISO639_2B").get(sub['title_lang'], sub['title_lang']) if sub['title_lang'] else "und"
             title_lang = sub['title_lang']
             sub_type = sub['type']
             output_sub_langs.append(f"{title_lang} ({os.path.splitext(sub['path'])[1][1:]})")
@@ -1561,7 +1560,7 @@ def download_decrypt_merge_single(
         sub_str = "+".join(output_sub_langs) if output_sub_langs else "NoSubs"
         watermark_suffix = f".{watermark_name}" if encoding_cfg.use_watermark else ""
 
-        output_filename = f"{base_filename}.{quality_str}.[{audio_str}].[{sub_str}]{watermark_suffix}.{output_format}"
+        output_filename = f"{base_filename}.{quality_str}.[{audio_str}].[{sub_str}]{watermark_suffix}.{config_value('output_format')}"
 
         ffmpeg_cmd_list.extend(map_commands)
         ffmpeg_cmd_list.extend(metadata_commands)

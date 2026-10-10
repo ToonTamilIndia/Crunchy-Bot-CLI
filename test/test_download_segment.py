@@ -17,6 +17,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import config
 import crunchyroll
 
 
@@ -90,18 +91,14 @@ class DownloadSegmentTestCase(unittest.TestCase):
         # must override; the crunchyroll globals are only a fallback snapshot.
         import config as config_module
         self._config_module = config_module
-        self._saved = {
-            name: getattr(crunchyroll, name)
-            for name in ("TEMP_DIR", "download_threads", "max_retries", "retry_delay")
-        }
+        # Only module-level constants are saved on crunchyroll; the settings
+        # live on `config` and are saved separately below.
+        self._saved = {"TEMP_DIR": crunchyroll.TEMP_DIR}
         self._saved_config = {
             name: getattr(config_module, name, None)
             for name in ("download_threads", "max_retries", "retry_delay")
         }
         crunchyroll.TEMP_DIR = self.temp_dir
-        crunchyroll.download_threads = 4
-        crunchyroll.max_retries = 2
-        crunchyroll.retry_delay = 0
         config_module.download_threads = 4
         config_module.max_retries = 2
         config_module.retry_delay = 0

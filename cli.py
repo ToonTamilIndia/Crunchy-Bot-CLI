@@ -14,12 +14,11 @@ from crunchyroll import (
     get_episode_display_number, get_episode_season_title,
     get_episode_title, parse_episode_selection, set_cr_debug, resolve_debug_settings,
     get_download_path, get_encrypted_media_path, get_temp_path,
-    resolve_encoding_config, EncodingConfig,
+    resolve_encoding_config, EncodingConfig, config_value,
     extract_content_key, LicenseError,
     resolve_batch_subtitles, resolve_batch_audios, resolve_video_quality,
     dedup_preserving_order,
 )
-from config import *
 
 
 def _force_utf8_console():
@@ -142,8 +141,8 @@ if CLI_DEBUG:
         format="[LOG %(levelname)s] %(message)s",
     )
 auth = CrunchyrollAuth()
-if use_account and Email and Password:
-    vid_token = auth.get_user_token(Email, Password, allow_guest_fallback=False)
+if config_value("use_account") and config_value("Email") and config_value("Password"):
+    vid_token = auth.get_user_token(config_value("Email"), config_value("Password"), allow_guest_fallback=False)
     if not vid_token:
         print(f"Crunchyroll account login failed: {auth.last_auth_error or 'unknown error'}")
         print("Premium videos require a working account token. Set use_account = False for guest/free mode.")
@@ -158,8 +157,8 @@ crunchyroll = Crunchyroll(
     playback_endpoint=auth.playback_endpoint,
     playback_user_agent=auth.playback_user_agent,
     auth_instance=auth,
-    email=Email if use_account else None,
-    password=Password if use_account else None,
+    email=config_value("Email") if config_value("use_account") else None,
+    password=config_value("Password") if config_value("use_account") else None,
 )
 video_url = input("Enter the Crunchyroll video URL or search title: ").strip()
 
@@ -215,7 +214,7 @@ if "watch" in video_url:
     video = video_list[video_quality]
     print("Select the desired audio track:")
     for index, version in enumerate(video_info['versions']):
-        print(f"{index + 1}) {locale_map.get(version['audio_locale'],version['audio_locale'])}")    
+        print(f"{index + 1}) {config_value('locale_map').get(version['audio_locale'],version['audio_locale'])}")    
 
     print("Note: \n1) The audio quality is automatically set to high quality.\n2) To select multiple audios, enter the numbers separated by commas (e.g., 1, 2, 3).")
     audio_list_input = input("Enter the desired audio(s): ")
@@ -229,7 +228,7 @@ if "watch" in video_url:
         exit()
 
     selected_audios = [
-                {'audio_locale': locale_map.get(video_info['versions'][choice]['audio_locale'], video_info['versions'][choice]['audio_locale']), 'guid': video_info['versions'][choice]['guid']}
+                {'audio_locale': config_value("locale_map").get(video_info['versions'][choice]['audio_locale'], video_info['versions'][choice]['audio_locale']), 'guid': video_info['versions'][choice]['guid']}
                 for choice in audio_list
             ]
     license_handler = CrunchyrollLicense()
@@ -263,7 +262,6 @@ if "watch" in video_url:
             exit()  
 
 
-
     if ('captions' in video_info and video_info['captions']) or ('subtitles' in video_info and video_info['subtitles']):
         available_tracks = []
         track_info_list = []    
@@ -271,7 +269,7 @@ if "watch" in video_url:
 
         if 'captions' in video_info and video_info['captions']:
             for lang, data in video_info['captions'].items():
-                label = f"[CAPTION] {locale_map.get(lang, lang)}"
+                label = f"[CAPTION] {config_value('locale_map').get(lang, lang)}"
                 available_tracks.append(label)
                 track_info_list.append({
                     'type': 'caption',
@@ -285,7 +283,7 @@ if "watch" in video_url:
             for lang, data in video_info['subtitles'].items():
                 if lang == "none" or 'url' not in data:
                     continue
-                label = f"[SUBTITLE] {locale_map.get(lang, lang)}"
+                label = f"[SUBTITLE] {config_value('locale_map').get(lang, lang)}"
                 available_tracks.append(label)
                 track_info_list.append({
                     'type': 'subtitle',
@@ -310,7 +308,7 @@ if "watch" in video_url:
             selected_subtitles = []
             for i in subtitle_indices:
                 entry = track_info_list[i]
-                lang_display = locale_map.get(entry['language'], entry['language']) 
+                lang_display = config_value("locale_map").get(entry['language'], entry['language']) 
                 selected_subtitles.append({
                     'language': lang_display,
                     'url': entry['url'],
@@ -328,15 +326,14 @@ if "watch" in video_url:
         selected_subtitles = False  
 
 
-
     vidseg = get_segment_link_list(mpd__content, video['name'], video['base_url'])
     if not vidseg or "all" not in vidseg:
         print("Failed to resolve video segments for this episode.")
         exit()
     anime = re.sub(r"\s*\([^)]*\)", "", crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_title"])
     Title = anime + "." + "S" + str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"]).zfill(2) + "E" +  str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"]).zfill(2) + "-" + crunchyroll.get_single_info(id)["data"][0]["title"]
-    if use_custom_title:
-        Title = Custom_Title.format(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
+    if config_value("use_custom_title"):
+        Title = config_value("Custom_Title").format(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
     Title = re.sub(r'[<>:\"\'/\\|?*]', '', Title)   
 
     print("Downloading video file...")  
@@ -369,8 +366,6 @@ if "watch" in video_url:
                 subtitle['format'] = "srt"
 
 
-
-
     print("Decrypting video file...")
     enc_video_path = get_encrypted_media_path(f"enc_{Title}", "mp4")
     decrypt_file(enc_video_path, dec_video_path, key)
@@ -391,7 +386,7 @@ if "watch" in video_url:
     print("Merging video and audio files...")   
 
 
-    ffmpeg_command = f"{quote_argument(resolve_executable('ffmpeg', ffmpeg_path))} -nostdin -y -i {quote_argument(dec_video_path)}"
+    ffmpeg_command = f"{quote_argument(resolve_executable('ffmpeg', config_value('ffmpeg_path')))} -nostdin -y -i {quote_argument(dec_video_path)}"
 
     for audio in selected_audios:
         audio_file = get_temp_path(Title, f"{Title}_{audio['audio_locale']}.m4a")
@@ -419,9 +414,9 @@ if "watch" in video_url:
     output_name = f"{Title}.{video['height']}p.["
     for i, audio in enumerate(selected_audios, start=1):
         lang = audio['audio_locale']
-        lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang,lang)
+        lang_code = config_value("LANGUAGE_NAME_TO_ISO639_2B").get(lang,lang)
         if encoding_config.use_watermark:
-           ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="{Watermark_Name} - [{lang}]"'
+           ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="{config_value("Watermark_Name")} - [{lang}]"'
         else:
            ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="[{lang}]"'
         if i == 1:
@@ -434,9 +429,9 @@ if "watch" in video_url:
         output_name += f" ({audio_label}) ] [" if encoding_config.use_watermark else f" ["
         for i, subtitle in enumerate(selected_subtitles, start=0):
             lang = subtitle['language']
-            lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang,lang)
+            lang_code = config_value("LANGUAGE_NAME_TO_ISO639_2B").get(lang,lang)
             if encoding_config.use_watermark:
-               ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="{Watermark_Name} - [{lang}] [{subtitle["type"]}]"'
+               ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="{config_value("Watermark_Name")} - [{lang}] [{subtitle["type"]}]"'
             else:
                 ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="[{lang}] [{subtitle["type"]}]"'
             if i == 0:
@@ -446,7 +441,7 @@ if "watch" in video_url:
     else:
         output_name += f" ({audio_label})]" if encoding_config.use_watermark else f" ]" 
 
-    output_name += f"].{Watermark_Name}.{output_format}" if encoding_config.use_watermark else f"].{output_format}" 
+    output_name += f"].{config_value('Watermark_Name')}.{config_value('output_format')}" if encoding_config.use_watermark else f"].{config_value('output_format')}" 
     output_file = get_download_path(output_name, create_parent=True)
 
     ffmpeg_command += f" {encoding_config.get_ffmpeg_args_str()} {quote_argument(output_file)}"
@@ -464,8 +459,8 @@ else:
         playback_endpoint=auth.playback_endpoint,
         playback_user_agent=auth.playback_user_agent,
         auth_instance=auth,
-        email=Email if use_account else None,
-        password=Password if use_account else None,
+        email=config_value("Email") if config_value("use_account") else None,
+        password=config_value("Password") if config_value("use_account") else None,
     )
     match = re.search(r'"?https?://www\.crunchyroll\.com/(?:series)/([^/"]+)', video_url)
     if not match:
@@ -545,7 +540,7 @@ else:
         if aka == 1:
             print("Select the desired audio track:")
             for index, version in enumerate(video_info['versions']):
-                print(f"{index + 1}) {locale_map.get(version['audio_locale'],version['audio_locale'])}")        
+                print(f"{index + 1}) {config_value('locale_map').get(version['audio_locale'],version['audio_locale'])}")        
 
             print("Note: \n1) The audio quality is automatically set to high quality.\n2) To select multiple audios, enter the numbers separated by commas (e.g., 1, 2, 3).")
             audio_list_input = input("Enter the desired audio(s): ")
@@ -562,7 +557,7 @@ else:
                 [video_info['versions'][choice]['audio_locale'] for choice in audio_list]
             )
         selected_audios, missing_locales = resolve_batch_audios(
-            selected_audio_locales, video_info['versions'], locale_map
+            selected_audio_locales, video_info['versions'], config_value("locale_map")
         )
         for missing in missing_locales:
             print(f"[WARN] Audio locale {missing} is not available in this episode; skipping it.")
@@ -609,7 +604,7 @@ else:
 
             if 'captions' in video_info and video_info['captions']:
                 for lang, data in video_info['captions'].items():
-                    label = f"[CAPTION] {locale_map.get(lang, lang)}"
+                    label = f"[CAPTION] {config_value('locale_map').get(lang, lang)}"
                     available_tracks.append(label)
                     track_info_list.append({
                         'type': 'caption',
@@ -623,7 +618,7 @@ else:
                 for lang, data in video_info['subtitles'].items():
                     if lang == "none" or 'url' not in data:
                         continue
-                    label = f"[SUBTITLE] {locale_map.get(lang, lang)}"
+                    label = f"[SUBTITLE] {config_value('locale_map').get(lang, lang)}"
                     available_tracks.append(label)
                     track_info_list.append({
                         'type': 'subtitle',
@@ -658,7 +653,7 @@ else:
                 )
 
             selected_subtitles = resolve_batch_subtitles(
-                selected_subtitle_langs, track_info_list, locale_map
+                selected_subtitle_langs, track_info_list, config_value("locale_map")
             ) or False
     
     
@@ -669,8 +664,8 @@ else:
             exit()
         anime = re.sub(r"\s*\([^)]*\)", "", crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_title"])
         Title = anime + "." + "S" + str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"]).zfill(2) + "E" +  str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"]).zfill(2) + "-" + crunchyroll.get_single_info(id)["data"][0]["title"]
-        if use_custom_title:
-            Title = Custom_Title.format(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
+        if config_value("use_custom_title"):
+            Title = config_value("Custom_Title").format(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
         Title = re.sub(r'[<>:\"\'/\\|?*]', '', Title)       
 
         print("Downloading video file...")      
@@ -725,7 +720,7 @@ else:
         print("Merging video and audio files...")       
 
 
-        ffmpeg_command = f"{quote_argument(resolve_executable('ffmpeg', ffmpeg_path))} -nostdin -y -i {quote_argument(dec_video_path)}"
+        ffmpeg_command = f"{quote_argument(resolve_executable('ffmpeg', config_value('ffmpeg_path')))} -nostdin -y -i {quote_argument(dec_video_path)}"
 
         for audio in selected_audios:
             audio_file = get_temp_path(Title, f"{Title}_{audio['audio_locale']}.m4a")
@@ -754,9 +749,9 @@ else:
         output_name = f"{Title}.{video['height']}p.["
         for i, audio in enumerate(selected_audios, start=1):
             lang = audio['audio_locale']
-            lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang, lang) if lang else "und" 
+            lang_code = config_value("LANGUAGE_NAME_TO_ISO639_2B").get(lang, lang) if lang else "und" 
             if encoding_config.use_watermark:
-               ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="{Watermark_Name} - [{lang}]"'
+               ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="{config_value("Watermark_Name")} - [{lang}]"'
             else:
                ffmpeg_command += f' -metadata:s:a:{i-1} language={lang_code} -metadata:s:a:{i-1} title="[{lang}]"'
             if i == 1:
@@ -769,9 +764,9 @@ else:
             output_name += f" ({audio_label}) ] [" if encoding_config.use_watermark else f" ["
             for i, subtitle in enumerate(selected_subtitles, start=0):
                 lang = subtitle['language']
-                lang_code = LANGUAGE_NAME_TO_ISO639_2B.get(lang, lang) if lang else "und"      
+                lang_code = config_value("LANGUAGE_NAME_TO_ISO639_2B").get(lang, lang) if lang else "und"      
                 if encoding_config.use_watermark:
-                   ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="{Watermark_Name} - [{lang}] [{subtitle["type"]}]"'
+                   ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="{config_value("Watermark_Name")} - [{lang}] [{subtitle["type"]}]"'
                 else:
                     ffmpeg_command += f' -metadata:s:s:{i} language={lang_code} -metadata:s:s:{i} title="[{lang}] [{subtitle["type"]}]"'
                 if i == 0:
@@ -781,7 +776,7 @@ else:
         else:
             output_name += f" ({audio_label})]" if encoding_config.use_watermark else f" ]"     
 
-        output_name += f"].{Watermark_Name}.{output_format}" if encoding_config.use_watermark else f"].{output_format}"     
+        output_name += f"].{config_value('Watermark_Name')}.{config_value('output_format')}" if encoding_config.use_watermark else f"].{config_value('output_format')}"     
         output_file = get_download_path(anime, output_name, create_parent=True)
 
         ffmpeg_command += f" {encoding_config.get_ffmpeg_args_str()} {quote_argument(output_file)}"
@@ -795,7 +790,6 @@ else:
            aka = 0
 
                 
-
 
 
 

@@ -17,7 +17,6 @@ from pathlib import Path
 from tqdm import tqdm
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import *
 import shutil
 
 CR_API_BASE = "https://beta-api.crunchyroll.com"
@@ -45,7 +44,10 @@ CR_WEB_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) "
     "Gecko/20100101 Firefox/137.0"
 )
-CR_DEBUG = bool(globals().get("debug", False))
+# Seeded here so the library works before any entry point calls set_cr_debug().
+# The effective value is resolved live by resolve_debug_settings().
+CR_DEBUG = False
+
 CRD_AUTH_DATA_URLS = (
     "https://Crunchy-DL.github.io/Crunchy-Downloader/data.json",
     "https://crunchy-dl.github.io/Crunchy-Downloader/data.json",
@@ -157,6 +159,17 @@ def normalize_debug_level(value, default=DEFAULT_DEBUG_LEVEL):
             return number
         return default
     return default
+
+
+def config_value(name, default=None):
+    """Public live accessor for a config.py setting.
+
+    `from config import *` binds values at import time, so reading a setting
+    from a bare global silently ignores any later change. Routing every read
+    through this keeps config, cli and tg agreeing on the current value.
+    """
+    value = _config_value(name)
+    return default if value is None else value
 
 
 def _as_bool(value, default=False):
@@ -321,8 +334,8 @@ class CrunchyrollBase:
         self.session.headers.update(headers)
 
     def request(self, method, url, **kwargs):
-        if use_proxy and proxy:
-            kwargs.setdefault("proxy", proxy)
+        if config_value("use_proxy") and config_value("proxy"):
+            kwargs.setdefault("proxy", config_value("proxy"))
         if is_crunchyroll_url(url):
             return getattr(self.session, method)(url, **kwargs)
 
@@ -366,8 +379,8 @@ class CrunchyrollBase:
 
 
 def _http_request(method, url, **kwargs):
-    if use_proxy and proxy:
-        kwargs.setdefault("proxies", {"http": proxy, "https": proxy})
+    if config_value("use_proxy") and config_value("proxy"):
+        kwargs.setdefault("proxies", {"http": config_value("proxy"), "https": config_value("proxy")})
     return requests.request(method, url, **kwargs)
 
 
@@ -741,9 +754,9 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
         for key, value in normalized_headers.items():
             cmd.extend(["-H", f"{key}: {value}"])
         cmd.extend([url.strip(), "-o", temp_path])
-        if use_proxy:
+        if config_value("use_proxy"):
             cmd.insert(-2, "--proxy")
-            cmd.insert(-2, proxy)
+            cmd.insert(-2, config_value("proxy"))
         return cmd
 
     def run_curl(url, temp_path, stall_time):
@@ -790,8 +803,8 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
         for key, value in normalized_headers.items():
             cmd.extend(["-H", f"{key}: {value}"])
         cmd.append(url.strip())
-        if use_proxy:
-            cmd.extend(["--proxy", proxy])
+        if config_value("use_proxy"):
+            cmd.extend(["--proxy", config_value("proxy")])
         try:
             result = subprocess.run(
                 cmd,
@@ -2064,21 +2077,21 @@ class CrunchyrollAuth(CrunchyrollBase):
         )
 
 def get_filter_complex():
-    target_font = fontfile
+    target_font = config_value("fontfile")
     if not os.path.isabs(target_font):
-        app_font = os.path.join(os.path.dirname(os.path.abspath(__file__)), fontfile)
+        app_font = os.path.join(os.path.dirname(os.path.abspath(__file__)), config_value("fontfile"))
         if os.path.isfile(app_font):
             target_font = app_font
     if os.name == "nt":
         target_font = target_font.replace("\\", "/").replace(":", "\\:")
 
     return (
-        f"[0:v]drawtext=text='{Watermark_Name}':"
+        f"[0:v]drawtext=text='{config_value('Watermark_Name')}':"
         f"fontfile={target_font}:"
-        f"fontcolor={fontcolor}@{opaque}:" 
-        f"fontsize={fontsize}:"
-        f"x={x_axis}:"
-        f"y={y_axis}[v]"
+        f"fontcolor={config_value('fontcolor')}@{config_value('opaque')}:" 
+        f"fontsize={config_value('fontsize')}:"
+        f"x={config_value('x_axis')}:"
+        f"y={config_value('y_axis')}[v]"
     )
 
 
@@ -2159,6 +2172,10 @@ def resolve_encoding_config(
     """
     import config
 
+    # An explicitly requested mode (--lossy/--lossless/--mode=) must win over the
+    # legacy original_quality switch; otherwise `--lossy` silently did nothing
+    # whenever original_quality was enabled in config.
+    mode_explicit = mode is not None
     if mode is None:
         mode = getattr(config, "encoding_mode", "lossy")
     if original_quality is None:
@@ -2178,8 +2195,8 @@ def resolve_encoding_config(
     if output_format is None:
         output_format = getattr(config, "output_format", "mkv")
 
-    # Determine normalized mode
-    if original_quality:
+# Determine normalized mode
+    if original_quality and not mode_explicit:
         norm_mode = "lossless"
     else:
         norm_mode = str(mode).strip().lower() if mode else "lossy"
@@ -2296,7 +2313,7 @@ class Crunchyroll(CrunchyrollBase):
                 self._email or "",
                 self._password or "",
                 etp_rt=self._auth._configured_etp_rt() or None,
-                allow_guest_fallback=bool(globals().get("allow_guest_fallback", True)),
+                allow_guest_fallback=_as_bool(config_value("allow_guest_fallback", True)),
                 force_refresh=True,
             )
             if new_token and new_token != self.token:
@@ -2678,4 +2695,6 @@ def find_guid_by_locale(data, locale):
         if audio_locale == "en-US":
             en_us_guid = guid
     return en_us_guid
+
+
 

@@ -9,6 +9,7 @@ cancellation, and cleanup that cannot clobber a newer session.
 import threading
 import unittest
 
+import config
 import tg
 
 
@@ -24,31 +25,31 @@ def make_session(step="confirm_download", message=None):
 
 class StateTestCase(unittest.TestCase):
     def setUp(self):
-        tg.user_states.clear()
-        tg.active_downloads.clear()
+        config.user_states.clear()
+        config.active_downloads.clear()
         tg.cancelled_users.clear()
 
     def tearDown(self):
-        tg.user_states.clear()
-        tg.active_downloads.clear()
+        config.user_states.clear()
+        config.active_downloads.clear()
         tg.cancelled_users.clear()
 
 
 class TestStartTransitionIsAtomic(StateTestCase):
     def test_first_claim_succeeds(self):
-        tg.user_states[7] = make_session()
+        config.user_states[7] = make_session()
         self.assertTrue(tg.begin_active_download(7, "confirm_download"))
         self.assertTrue(tg.get_active_download(7))
-        self.assertEqual(tg.user_states[7]["step"], "downloading")
+        self.assertEqual(config.user_states[7]["step"], "downloading")
 
     def test_second_claim_is_refused(self):
         """A double-tapped Start button must not launch the job twice."""
-        tg.user_states[7] = make_session()
+        config.user_states[7] = make_session()
         self.assertTrue(tg.begin_active_download(7, "confirm_download"))
         self.assertFalse(tg.begin_active_download(7, "confirm_download"))
 
     def test_wrong_step_is_refused(self):
-        tg.user_states[7] = make_session(step="select_quality")
+        config.user_states[7] = make_session(step="select_quality")
         self.assertFalse(tg.begin_active_download(7, "confirm_download"))
         self.assertFalse(tg.get_active_download(7))
 
@@ -57,7 +58,7 @@ class TestStartTransitionIsAtomic(StateTestCase):
 
     def test_concurrent_claims_produce_exactly_one_winner(self):
         """Race the transition from many threads, as a double-tap would."""
-        tg.user_states[42] = make_session()
+        config.user_states[42] = make_session()
         winners = []
         barrier = threading.Barrier(16)
 
@@ -76,15 +77,15 @@ class TestStartTransitionIsAtomic(StateTestCase):
 
 class TestCancellation(StateTestCase):
     def test_cancel_flags_the_user(self):
-        tg.user_states[7] = make_session(step="downloading")
+        config.user_states[7] = make_session(step="downloading")
         tg.request_cancel(7)
         self.assertTrue(tg.is_cancelled(7))
 
     def test_cancel_drops_session_and_guard(self):
-        tg.user_states[7] = make_session(step="downloading")
-        tg.active_downloads[7] = tg.user_states[7]
+        config.user_states[7] = make_session(step="downloading")
+        config.active_downloads[7] = config.user_states[7]
         tg.request_cancel(7)
-        self.assertNotIn(7, tg.user_states)
+        self.assertNotIn(7, config.user_states)
         self.assertFalse(tg.get_active_download(7))
 
     def test_cancel_with_no_session_returns_none(self):
@@ -92,11 +93,11 @@ class TestCancellation(StateTestCase):
 
     def test_new_download_clears_a_stale_cancel_flag(self):
         """After cancelling, the user's next run must not self-cancel."""
-        tg.user_states[7] = make_session()
+        config.user_states[7] = make_session()
         tg.request_cancel(7)
         self.assertTrue(tg.is_cancelled(7))
 
-        tg.user_states[7] = make_session()          # user starts over
+        config.user_states[7] = make_session()          # user starts over
         self.assertTrue(tg.begin_active_download(7, "confirm_download"))
         self.assertFalse(tg.is_cancelled(7))
 
@@ -104,36 +105,36 @@ class TestCancellation(StateTestCase):
 class TestCleanupOnlyReleasesOwnedResources(StateTestCase):
     def test_normal_finish_clears_state_and_guard(self):
         state = make_session()
-        tg.user_states[7] = state
+        config.user_states[7] = state
         self.assertTrue(tg.begin_active_download(7, "confirm_download"))
         tg.finish_active_download(7, state)
-        self.assertNotIn(7, tg.user_states)
+        self.assertNotIn(7, config.user_states)
         self.assertFalse(tg.get_active_download(7))
 
     def test_stale_worker_does_not_delete_a_new_session(self):
         """The bug: a cancelled worker's cleanup wiping the user's new run."""
         old = make_session(step="downloading")
-        tg.user_states[7] = old
-        tg.active_downloads[7] = old
+        config.user_states[7] = old
+        config.active_downloads[7] = old
 
         tg.request_cancel(7)                      # user cancels run #1
 
         new = make_session()                      # ...and immediately starts run #2
-        tg.user_states[7] = new
+        config.user_states[7] = new
         self.assertTrue(tg.begin_active_download(7, "confirm_download"))
 
         tg.finish_active_download(7, old)         # run #1 finally fires late
 
-        self.assertIn(7, tg.user_states, "new session must survive")
-        self.assertIs(tg.user_states[7], new)
+        self.assertIn(7, config.user_states, "new session must survive")
+        self.assertIs(config.user_states[7], new)
         self.assertTrue(tg.get_active_download(7), "new run's guard must survive")
 
     def test_finish_without_expected_state_clears_everything(self):
         state = make_session()
-        tg.user_states[7] = state
-        tg.active_downloads[7] = state
+        config.user_states[7] = state
+        config.active_downloads[7] = state
         tg.finish_active_download(7, None)
-        self.assertNotIn(7, tg.user_states)
+        self.assertNotIn(7, config.user_states)
         self.assertFalse(tg.get_active_download(7))
 
 
@@ -144,8 +145,8 @@ class TestSudoUsersAreStillGuarded(StateTestCase):
 
     def test_active_guard_reports_truthy_for_any_user(self):
         state = make_session()
-        tg.user_states[5] = state
-        tg.active_downloads[5] = state
+        config.user_states[5] = state
+        config.active_downloads[5] = state
         self.assertTrue(tg.get_active_download(5))
 
 
