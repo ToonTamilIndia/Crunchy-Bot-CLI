@@ -159,6 +159,26 @@ def normalize_debug_level(value, default=DEFAULT_DEBUG_LEVEL):
     return default
 
 
+def _as_bool(value, default=False):
+    """Coerce a config value to a bool.
+
+    `use_watermark = "False"` is a truthy string, so a plain `if value:` would
+    silently switch the watermark on. Spell the string values out explicitly.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off", ""):
+            return False
+        return default
+    return bool(value)
+
+
 def _config_int(name, default, minimum=None):
     """Read an integer setting, tolerating a quoted value in config.py.
 
@@ -2142,9 +2162,9 @@ def resolve_encoding_config(
     if mode is None:
         mode = getattr(config, "encoding_mode", "lossy")
     if original_quality is None:
-        original_quality = getattr(config, "original_quality", False)
+        original_quality = _as_bool(getattr(config, "original_quality", False))
     if use_watermark is None:
-        use_watermark = getattr(config, "use_watermark", False)
+        use_watermark = _as_bool(getattr(config, "use_watermark", False))
     if encoding_code is None:
         encoding_code = getattr(config, "encoding_code", "libx265")
     if audio_codec is None:
@@ -2658,3 +2678,4 @@ def find_guid_by_locale(data, locale):
         if audio_locale == "en-US":
             en_us_guid = guid
     return en_us_guid
+

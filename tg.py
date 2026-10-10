@@ -306,23 +306,82 @@ def edit_message(message: Message, text: str, keyboard: InlineKeyboardMarkup = N
     with suppress(MessageNotModified, QueryIdInvalid):
         message.edit_text(text, reply_markup=keyboard, parse_mode=enums.ParseMode.MARKDOWN)
 
+def config_value(name, default=None):
+    """Read a setting live from config, falling back to the import snapshot."""
+    try:
+        import config as _config
+        if hasattr(_config, name):
+            return getattr(_config, name)
+    except Exception:
+        pass
+    return globals().get(name, default)
+
+
+def as_bool(value, default=False):
+    """Coerce a config value to a bool.
+
+    `use_watermark = "False"` is a truthy string, which would silently switch
+    the watermark on, so spell the string values out explicitly.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off", ""):
+            return False
+        return default
+    return bool(value)
+
+
+def as_int(value, default):
+    """Coerce a config value to int, tolerating a quoted number."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def is_sudo_user(user_id):
+    return user_id in sudo_users
+
+
+def is_premium_user(user_id):
+    return user_id in premium_users
+
+
+# pyrogram's filters.user() copies its argument into a set when the filter is
+# built, so a decorator gated on the sudo list is frozen at import and never
+# sees a user added later by /addsudo. These evaluate the live list on every
+# incoming update instead.
+is_sudo = filters.create(lambda _, __, message: is_sudo_user(message.from_user.id))
+is_premium = filters.create(lambda _, __, message: is_premium_user(message.from_user.id))
+
+
 def get_user_limits(user_id):
-    if user_id in sudo_users:
+    if is_sudo_user(user_id):
         return float('inf'), float('inf')
-    elif user_id in premium_users:
+    if is_premium_user(user_id):
         return float('inf'), float('inf')
-    else:
-        return REGULAR_USER_AUDIO_LIMIT, REGULAR_USER_VIDEO_LIMIT_P
+    return (
+        as_int(config_value("REGULAR_USER_AUDIO_LIMIT"), 2),
+        as_int(config_value("REGULAR_USER_VIDEO_LIMIT_P"), 480),
+    )
 
 
 def get_download_access_filter():
-    if AUTHORIZED_USERS:
-        access_filter = filters.chat(AUTHORIZED_USERS)
+    """Build the access filter; re-evaluated per update because sudo changes."""
+    authorized = config_value("AUTHORIZED_USERS") or []
+    if as_bool(authorized):
+        access_filter = filters.chat(authorized)
     else:
         access_filter = filters.private
-    if sudo_users:
-        access_filter = access_filter | filters.user(sudo_users)
-    return access_filter
+    return access_filter | is_sudo
 
 
 DOWNLOAD_ACCESS_FILTER = get_download_access_filter()
@@ -390,7 +449,7 @@ def cancel_command(client, message: Message):
     else:
         message.reply_text("No active download process to cancel.")
 
-@app.on_message(filters.command("addpremium") & filters.user(sudo_users))
+@app.on_message(filters.command("addpremium") & is_sudo)
 def add_premium(client, message: Message):
     try:
         user_id_to_add = int(message.text.split(maxsplit=1)[1])
@@ -404,7 +463,7 @@ def add_premium(client, message: Message):
     except Exception as e:
         message.reply_text(f"An error occurred: {e}")
 
-@app.on_message(filters.command("rempremium") & filters.user(sudo_users))
+@app.on_message(filters.command("rempremium") & is_sudo)
 def rem_premium(client, message: Message):
     try:
         user_id_to_rem = int(message.text.split(maxsplit=1)[1])
@@ -418,14 +477,14 @@ def rem_premium(client, message: Message):
     except Exception as e:
         message.reply_text(f"An error occurred: {e}")
 
-@app.on_message(filters.command("listpremium") & filters.user(sudo_users))
+@app.on_message(filters.command("listpremium") & is_sudo)
 def list_premium(client, message: Message):
     if not premium_users:
         message.reply_text("The premium user list is empty.")
     else:
         message.reply_text("Premium Users:\n" + "\n".join(f"- `{uid}`" for uid in premium_users))
 
-@app.on_message(filters.command("addsudo") & filters.user(sudo_users))
+@app.on_message(filters.command("addsudo") & is_sudo)
 def add_sudo(client, message: Message):
     try:
         user_id_to_add = int(message.text.split(maxsplit=1)[1])
@@ -439,7 +498,7 @@ def add_sudo(client, message: Message):
     except Exception as e:
         message.reply_text(f"An error occurred: {e}")
 
-@app.on_message(filters.command("remsudo") & filters.user(sudo_users))
+@app.on_message(filters.command("remsudo") & is_sudo)
 def rem_sudo(client, message: Message):
     try:
         user_id_to_rem = int(message.text.split(maxsplit=1)[1])
@@ -456,7 +515,7 @@ def rem_sudo(client, message: Message):
     except Exception as e:
         message.reply_text(f"An error occurred: {e}")
 
-@app.on_message(filters.command("listsudo") & filters.user(sudo_users))
+@app.on_message(filters.command("listsudo") & is_sudo)
 def list_sudo(client, message: Message):
     if not sudo_users:
         message.reply_text("The sudo user list is empty. This shouldn't happen!")
@@ -1074,8 +1133,10 @@ def process_download(client, user_id):
         if is_series:
             episodes_to_download = state["data"]["episodes"]
             series_anime_title = re.sub(r'[<>:\"\'/\\|?*]', '', state["data"]["series_title"])
+            # Resolved properly under Downloads/ later; creating a relative
+            # directory here would litter the process working directory and
+            # fail outright if that directory is not writable.
             series_output_dir = series_anime_title
-            os.makedirs(series_output_dir, exist_ok=True)
             total_episodes = len(episodes_to_download)
 
             edit_message(status_msg, f"Starting batch download for '{series_anime_title}' ({total_episodes} episodes)...")
@@ -1541,11 +1602,11 @@ def cleanup_files(file_paths):
                         for dir_name in dirs:
                             os.rmdir(os.path.join(root, dir_name))
                     os.rmdir(file_path)
-                    if debug:
+                    if config_value("debug"):
                         print(f"Deleted directory: {file_path}")
                 else:
                     os.remove(file_path)
-                    if debug:
+                    if config_value("debug"):
                         print(f"Deleted file: {file_path}")
             except OSError as e:
                 print(f"Error deleting file {file_path}: {e}")
@@ -1553,7 +1614,7 @@ def cleanup_files(file_paths):
     if os.path.exists(temp_dir) and not os.listdir(temp_dir):
         try:
             os.rmdir(temp_dir)
-            if debug:
+            if config_value("debug"):
                 print(f"Removed empty Temp directory: {temp_dir}")
         except OSError as e:
             print(f"Could not remove empty Temp directory: {e}")
@@ -1563,5 +1624,6 @@ if __name__ == "__main__":
     print("Starting bot...")
     app.run()
     print("Bot stopped.")
+
 
 
