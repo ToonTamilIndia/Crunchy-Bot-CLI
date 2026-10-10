@@ -374,17 +374,29 @@ def get_user_limits(user_id):
     )
 
 
-def get_download_access_filter():
-    """Build the access filter; re-evaluated per update because sudo changes."""
+def update_is_authorized(message):
+    """Evaluate the chat allowlist live, for a single incoming update.
+
+    filters.chat() copies its argument when the filter is built, so building the
+    allowlist at import froze it: restricting AUTHORIZED_USERS later still let
+    any private user through. This mirrors the is_sudo pattern above and reads
+    the current list on every update.
+    """
+    chat = getattr(message, "chat", None)
+    if chat is None:
+        return False
     authorized = config_value("AUTHORIZED_USERS") or []
     if as_bool(authorized):
-        access_filter = filters.chat(authorized)
-    else:
-        access_filter = filters.private
-    return access_filter | is_sudo
+        chat_id = getattr(chat, "id", None)
+        username = getattr(chat, "username", None)
+        return chat_id in authorized or username in authorized
+    # Empty allowlist means "any private chat".
+    return getattr(chat, "type", None) == enums.ChatType.PRIVATE
 
 
-DOWNLOAD_ACCESS_FILTER = get_download_access_filter()
+DOWNLOAD_ACCESS_FILTER = (
+    filters.create(lambda _, __, message: update_is_authorized(message)) | is_sudo
+)
 
 
 def get_decryption_key(license_response, kid=None):

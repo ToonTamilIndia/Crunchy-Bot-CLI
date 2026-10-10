@@ -2792,8 +2792,3 @@ def find_guid_by_locale(data, locale):
         if audio_locale == "en-US":
             en_us_guid = guid
     return en_us_guid
-
-
-
-
-

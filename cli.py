@@ -203,14 +203,14 @@ if "watch" in video_url:
     print("Select the video quality:")
     for i, video in enumerate(video_list):
         print(f"{i + 1}. {video['height']}p, bandwidth: {video['bandwidth']}")
-        try:
-            video_quality = int(input("Enter the video quality: ")) - 1
-        except ValueError:
-            print("Invalid input. Please enter a number.")
-            exit()
-        if video_quality < 0 or video_quality >= len(video_list):
-            print("Invalid video quality")
-            exit()
+    try:
+        video_quality = int(input("Enter the video quality: ")) - 1
+    except ValueError:
+        print("Invalid input. Please enter a number.")
+        exit()
+    if video_quality < 0 or video_quality >= len(video_list):
+        print("Invalid video quality")
+        exit()
     video = video_list[video_quality]
     print("Select the desired audio track:")
     for index, version in enumerate(video_info['versions']):
