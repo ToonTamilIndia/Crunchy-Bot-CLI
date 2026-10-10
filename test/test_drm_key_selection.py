@@ -206,5 +206,99 @@ class TestBuildLicenseKeyEntries(unittest.TestCase):
         self.assertEqual(len(resolved.split(":")[1]), 32)
 
 
+class TestAudioAndVideoKeySelection(unittest.TestCase):
+    """Audio and video must each get their own key when the MPD says so.
+
+    Verified against a real account: every title surveyed declared one
+    default_KID shared by the video and audio AdaptationSets, and the license
+    returned four CONTENT keys of which only one matched. The correct key's
+    index varied per title, so the old "first CONTENT key" heuristic was right
+    only by luck. These tests pin both shapes: the shared-KID layout Crunchyroll
+    actually serves, and the per-track layout the matcher must handle if it ever
+    appears.
+    """
+
+    SHARED = "afcdf05509fc30df9e84302dcf716bf8"
+
+    def _shared_license(self):
+        """The real layout: one MPD KID, four unrelated keys in the license."""
+        return {"key": [
+            key_entry("21f596c6c60311111111111111111111", "11" * 16),
+            key_entry(self.SHARED, "22" * 16),
+            key_entry("afe939b90ab82222222222222222222", "33" * 16),
+            key_entry("fd1ee62c3f95333333333333333333", "44" * 16),
+        ]}
+
+    def test_shared_kid_yields_the_same_key_for_both_tracks(self):
+        payload = self._shared_license()
+        video = extract_content_key(payload, kid=self.SHARED)
+        audio = extract_content_key(payload, kid=self.SHARED)
+        self.assertEqual(video, audio)
+        self.assertEqual(video, f"{self.SHARED}:{'22' * 16}")
+
+    def test_correct_key_is_not_always_the_first_one(self):
+        """The matched key sat at index 1 for this title; 'first key' was wrong."""
+        payload = self._shared_license()
+        first_key = f"{payload['key'][0]['kid_hex']}:{payload['key'][0]['key_hex']}"
+        self.assertNotEqual(extract_content_key(payload, kid=self.SHARED), first_key)
+
+    def test_every_kid_in_a_license_resolves_to_its_own_key(self):
+        """The matcher must handle a license full of genuinely distinct KIDs."""
+        payload = self._shared_license()
+        for key in payload["key"]:
+            with self.subTest(kid=key["kid_hex"][:12]):
+                self.assertEqual(extract_content_key(payload, kid=key["kid_hex"]),
+                                 f"{key['kid_hex']}:{key['key_hex']}")
+
+    def test_distinct_audio_and_video_kids_get_distinct_keys(self):
+        payload = {"key": [
+            key_entry(VIDEO_KID, "aa" * 16),
+            key_entry(AUDIO_KID, "bb" * 16),
+        ]}
+        video = extract_content_key(payload, kid=VIDEO_KID)
+        audio = extract_content_key(payload, kid=AUDIO_KID)
+        self.assertNotEqual(video, audio)
+        self.assertEqual(video.split(":")[1], "aa" * 16)
+        self.assertEqual(audio.split(":")[1], "bb" * 16)
+
+    def test_audio_kid_absent_from_license_raises_rather_than_mismatching(self):
+        payload = {"key": [key_entry(VIDEO_KID, "aa" * 16)]}
+        with self.assertRaises(LicenseError):
+            extract_content_key(payload, kid=AUDIO_KID)
+
+    def test_telegram_matches_each_track_the_same_way(self):
+        import tg
+
+        payload = {"key": [
+            key_entry(VIDEO_KID, "aa" * 16),
+            key_entry(AUDIO_KID, "bb" * 16),
+        ]}
+        self.assertEqual(tg.get_decryption_key(payload, VIDEO_KID),
+                         f"{VIDEO_KID}:{'aa' * 16}")
+        self.assertEqual(tg.get_decryption_key(payload, AUDIO_KID),
+                         f"{AUDIO_KID}:{'bb' * 16}")
+
+
+class TestCliCallSitesPassAKid(unittest.TestCase):
+    """Static guard mirroring the one on tg.py."""
+
+    def test_all_cli_call_sites_pass_a_kid(self):
+        import ast
+        from pathlib import Path
+
+        cli = Path(__file__).resolve().parent.parent / "cli.py"
+        tree = ast.parse(cli.read_text(encoding="utf-8", newline="").replace("\r\n", "\n"))
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name)
+                 and n.func.id == "extract_content_key"]
+        self.assertEqual(len(calls), 4, "expected 4 extract_content_key call sites")
+        for call in calls:
+            with self.subTest(line=call.lineno):
+                self.assertGreaterEqual(len(call.args), 3,
+                                        f"cli.py:{call.lineno} does not pass a kid")
+                self.assertIn("kid", ast.unparse(call.args[2]))
+
+
 if __name__ == "__main__":
     unittest.main()
