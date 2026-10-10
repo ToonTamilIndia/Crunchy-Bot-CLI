@@ -8,6 +8,7 @@ strictly in playlist order regardless of completion order.
 
 import hashlib
 import random
+from contextlib import suppress
 import re
 import shutil
 import tempfile
@@ -85,18 +86,35 @@ class DownloadSegmentTestCase(unittest.TestCase):
         self.base_url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
 
         self.temp_dir = Path(tempfile.mkdtemp())
+        # Settings are read live from the config module, so that is what a test
+        # must override; the crunchyroll globals are only a fallback snapshot.
+        import config as config_module
+        self._config_module = config_module
         self._saved = {
             name: getattr(crunchyroll, name)
             for name in ("TEMP_DIR", "download_threads", "max_retries", "retry_delay")
+        }
+        self._saved_config = {
+            name: getattr(config_module, name, None)
+            for name in ("download_threads", "max_retries", "retry_delay")
         }
         crunchyroll.TEMP_DIR = self.temp_dir
         crunchyroll.download_threads = 4
         crunchyroll.max_retries = 2
         crunchyroll.retry_delay = 0
+        config_module.download_threads = 4
+        config_module.max_retries = 2
+        config_module.retry_delay = 0
 
     def tearDown(self):
         for name, value in self._saved.items():
             setattr(crunchyroll, name, value)
+        for name, value in self._saved_config.items():
+            if value is None:
+                with suppress(AttributeError):
+                    delattr(self._config_module, name)
+            else:
+                setattr(self._config_module, name, value)
         self.httpd.shutdown()
         self.httpd.server_close()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
@@ -146,7 +164,7 @@ class TestSingleFileRepresentation(DownloadSegmentTestCase):
 
         self.download([url], "capped")
 
-        self.assertLessEqual(len(self.part_ranges()), crunchyroll.download_threads)
+        self.assertLessEqual(len(self.part_ranges()), self._config_module.download_threads)
 
     def test_single_stream_fallback_still_matches_original(self):
         """An origin that ignores Range must fall back cleanly, not corrupt output."""

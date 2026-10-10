@@ -1,4 +1,5 @@
 import time
+import sys
 import tls_client
 import uuid
 import random
@@ -127,6 +128,120 @@ def cr_debug(message):
         print(f"[DEBUG] {message}")
 
 
+LOG_LEVEL_NAMES = frozenset(
+    {"CRITICAL", "FATAL", "ERROR", "WARN", "WARNING", "INFO", "DEBUG", "NOTSET"}
+)
+
+DEFAULT_DEBUG_LEVEL = "DEBUG"
+
+
+def normalize_debug_level(value, default=DEFAULT_DEBUG_LEVEL):
+    """Coerce a configured log level into a name `logging` will accept.
+
+    An empty or unrecognised level must never be handed to logging.basicConfig:
+    it raises ValueError and takes the whole program down. Returns the default
+    instead so a typo degrades to normal logging instead of crashing.
+    """
+    if value is None:
+        return default
+    name = str(value).strip().upper()
+    if not name:
+        return default
+    if name in LOG_LEVEL_NAMES:
+        return name
+    if name.isdigit():
+        # logging accepts an int level, but never a numeric string, so convert
+        # here instead of letting basicConfig raise on "--debug=5".
+        number = int(name)
+        if 0 <= number <= 50:
+            return number
+        return default
+    return default
+
+
+def _config_int(name, default, minimum=None):
+    """Read an integer setting, tolerating a quoted value in config.py.
+
+    `max_retries = "3"` would otherwise raise TypeError from range(), and
+    `retry_delay = "2"` would be repeated as a string before being added to a
+    float. Coerce here so a quoting mistake degrades instead of crashing.
+    """
+    raw = _config_value(name)
+    if raw is None or raw == "":
+        value = default
+    else:
+        try:
+            value = int(float(raw))
+        except (TypeError, ValueError):
+            value = default
+    if minimum is not None and value < minimum:
+        value = minimum
+    return value
+
+
+def _config_float(name, default, minimum=None):
+    """Read a float setting, tolerating a quoted value in config.py."""
+    raw = _config_value(name)
+    if raw is None or raw == "":
+        value = float(default)
+    else:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = float(default)
+    if minimum is not None and value < minimum:
+        value = float(minimum)
+    return value
+
+
+def resolve_debug_settings(argv=None, flag="--debug", negate_flag="--no-debug"):
+    """Resolve debug on/off and log level from CLI arguments and config.
+
+    Keeping this in one place means every entry point agrees on precedence:
+
+        --no-debug          force off, overriding config
+        --debug=LEVEL       force on at a given level
+        --debug LEVEL       same, as a separate argument
+        --debug             on, using the configured level
+        (nothing)           follow config
+
+    Returns (enabled, level_name). Never raises.
+    """
+    args = list(sys.argv[1:] if argv is None else argv)
+    configured_on = bool(_config_value("debug"))
+    configured_level = _config_value("level", "LOG_LEVEL")
+
+    enabled = configured_on
+    level = normalize_debug_level(configured_level)
+
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == negate_flag:
+            return False, level
+        if arg == flag:
+            enabled = True
+            if "=" in arg:
+                _, _, inline = arg.partition("=")
+                if inline.strip():
+                    level = normalize_debug_level(inline, level)
+            elif index + 1 < len(args):
+                candidate = args[index + 1].strip()
+                if candidate.upper() in LOG_LEVEL_NAMES:
+                    level = normalize_debug_level(candidate, level)
+                    index += 1
+            index += 1
+            continue
+        if arg.startswith(flag + "="):
+            enabled = True
+            _, _, inline = arg.partition("=")
+            if inline.strip():
+                level = normalize_debug_level(inline, level)
+        index += 1
+
+    return enabled, level
+
+
 def _version_tuple(version):
     return tuple(int(part) for part in re.findall(r"\d+", version or "0"))
 
@@ -237,6 +352,23 @@ def _http_request(method, url, **kwargs):
 
 
 def _config_value(*names):
+    """Read a setting from config, preferring the live module over the snapshot.
+
+    `from config import *` binds values at import time, so a script or test that
+    sets `config.debug = True` afterwards would silently be ignored. Consult the
+    module itself first and fall back to the star-imported snapshot.
+    """
+    try:
+        import config as _config_module
+    except Exception:
+        _config_module = None
+
+    for name in names:
+        if _config_module is not None and hasattr(_config_module, name):
+            # Return the live value verbatim, including "" or None. A caller that
+            # cleared a setting must not silently get the import-time snapshot
+            # back; fall through to the snapshot only when the name is absent.
+            return getattr(_config_module, name)
     for name in names:
         value = globals().get(name)
         if value:
@@ -543,9 +675,8 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
         raise RuntimeError("No segments were resolved for this stream.")
 
     total = len(segment_links)
-    configured_threads = globals().get("download_threads")
-    if isinstance(configured_threads, int) and configured_threads > 0:
-        max_threads = configured_threads
+    configured_threads = _config_int("download_threads", max_threads, minimum=1)
+    max_threads = configured_threads
     failed_segments = []
     assembled_expected_size = None
 
@@ -710,12 +841,14 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
         return False
 
     def download_task(index, task):
-        for retry in range(max_retries):
+        attempts = _config_int("max_retries", 3, minimum=1)
+        delay = _config_float("retry_delay", 2, minimum=0)
+        for retry in range(attempts):
             if fetch_task(task, "30"):
                 return index, True
-            backoff = retry_delay * (2 ** retry)
+            backoff = delay * (2 ** retry)
             time.sleep(backoff + random.uniform(0.0, 0.5))
-            print(f"[WARN] Segment {index} failed retrying ({retry + 1}/{max_retries}).")
+            print(f"[WARN] Segment {index} failed retrying ({retry + 1}/{attempts}).")
         with contextlib.suppress(Exception):
             os.remove(task["path"])
         return index, False
@@ -744,7 +877,7 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
                     failed_segments.remove((index, url))
             except Exception as e:
                 print(f"[DEBUG] Segment {index} final retry exception: {e}")
-            time.sleep(retry_delay)
+            time.sleep(_config_float("retry_delay", 2, minimum=0))
 
    
     if failed_segments:

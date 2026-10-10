@@ -12,7 +12,7 @@ from crunchyroll import (
     parse_mpd_content, get_segment_link_list, download_segment,
     get_filter_complex, convert_vtt_to_srt_custom,
     get_episode_display_number, get_episode_season_title,
-    get_episode_title, parse_episode_selection, set_cr_debug,
+    get_episode_title, parse_episode_selection, set_cr_debug, resolve_debug_settings,
     get_download_path, get_encrypted_media_path, get_temp_path,
     resolve_encoding_config, EncodingConfig,
     extract_content_key, LicenseError,
@@ -42,12 +42,14 @@ def _force_utf8_console():
 _force_utf8_console()
 
 
-HELP_TEXT = """Usage: python cli.py [--debug] [--lossy | --lossless | --mode=<mode>]
+HELP_TEXT = """Usage: python cli.py [--debug[=LEVEL] | --no-debug] [--lossy | --lossless | --mode=<mode>]
 
 Interactive Crunchyroll downloader.
 
 Options:
   --debug       Show safe auth/playback endpoint status details.
+  --debug=LEVEL Set the log level explicitly (DEBUG, INFO, WARNING, ERROR).
+  --no-debug    Force debug off, overriding debug=True in config.py.
   --lossy       Encode video in H.265 10-bit for small file size (default).
   --lossless    Direct stream copy (remux) for bit-for-bit source quality.
   --mode=<mode> Explicit encoding mode: lossy, lossless, custom.
@@ -65,7 +67,7 @@ if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
     print(HELP_TEXT)
     raise SystemExit(0)
 
-CLI_DEBUG = any(arg == "--debug" for arg in sys.argv[1:]) or bool(debug)
+CLI_DEBUG, DEBUG_LEVEL = resolve_debug_settings()
 set_cr_debug(CLI_DEBUG)
 
 cli_mode = None
@@ -134,8 +136,11 @@ def print_series_episode_list(series_title, seasons, episodes):
 
 
 if CLI_DEBUG:
-   import logging
-   logging.basicConfig(level=level)
+    import logging
+    logging.basicConfig(
+        level=DEBUG_LEVEL,
+        format="[LOG %(levelname)s] %(message)s",
+    )
 auth = CrunchyrollAuth()
 if use_account and Email and Password:
     vid_token = auth.get_user_token(Email, Password, allow_guest_fallback=False)
@@ -199,10 +204,14 @@ if "watch" in video_url:
     print("Select the video quality:")
     for i, video in enumerate(video_list):
         print(f"{i + 1}. {video['height']}p, bandwidth: {video['bandwidth']}")
-    video_quality = int(input("Enter the video quality: ")) - 1
-    if video_quality < 0 or video_quality >= len(video_list):
-        print("Invalid video quality")
-        exit()
+        try:
+            video_quality = int(input("Enter the video quality: ")) - 1
+        except ValueError:
+            print("Invalid input. Please enter a number.")
+            exit()
+        if video_quality < 0 or video_quality >= len(video_list):
+            print("Invalid video quality")
+            exit()
     video = video_list[video_quality]
     print("Select the desired audio track:")
     for index, version in enumerate(video_info['versions']):
@@ -210,7 +219,11 @@ if "watch" in video_url:
 
     print("Note: \n1) The audio quality is automatically set to high quality.\n2) To select multiple audios, enter the numbers separated by commas (e.g., 1, 2, 3).")
     audio_list_input = input("Enter the desired audio(s): ")
-    audio_list = [int(choice.strip()) - 1 for choice in audio_list_input.split(',')]
+    try:
+        audio_list = [int(choice.strip()) - 1 for choice in audio_list_input.split(',')]
+    except ValueError:
+        print("Invalid input. Please enter numbers only.")
+        exit()
     if any(choice < 0 or choice >= len(video_info['versions']) for choice in audio_list):
         print("Invalid choice(s). Please try again.")
         exit()
@@ -222,7 +235,8 @@ if "watch" in video_url:
     license_handler = CrunchyrollLicense()
     try:
         key = extract_content_key(
-            license_handler.get_license(pssh, token, id, crunchyroll.token), Title
+            license_handler.get_license(pssh, token, id, crunchyroll.token),
+            f"episode {id}",
         )
     except LicenseError as exc:
         print(f"[ERROR] {exc}")
@@ -322,7 +336,7 @@ if "watch" in video_url:
     anime = re.sub(r"\s*\([^)]*\)", "", crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_title"])
     Title = anime + "." + "S" + str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"]).zfill(2) + "E" +  str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"]).zfill(2) + "-" + crunchyroll.get_single_info(id)["data"][0]["title"]
     if use_custom_title:
-        Title = custom_title.format(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
+        Title = Custom_Title.format(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
     Title = re.sub(r'[<>:\"\'/\\|?*]', '', Title)   
 
     print("Downloading video file...")  
@@ -559,10 +573,11 @@ else:
         license_handler = CrunchyrollLicense()
         try:
             key = extract_content_key(
-                license_handler.get_license(pssh, token, id, crunchyroll.token), Title
+                license_handler.get_license(pssh, token, id, crunchyroll.token),
+                f"episode {download_index}/{len(selected_episode_indices)}",
             )
         except LicenseError as exc:
-            print(f"{ep_num_str}: {exc} Skipping.")
+            print(f"[WARN] Skipping episode {download_index}/{len(selected_episode_indices)}: {exc}")
             continue
 
         for audio in selected_audios:
@@ -655,7 +670,7 @@ else:
         anime = re.sub(r"\s*\([^)]*\)", "", crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_title"])
         Title = anime + "." + "S" + str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"]).zfill(2) + "E" +  str(crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"]).zfill(2) + "-" + crunchyroll.get_single_info(id)["data"][0]["title"]
         if use_custom_title:
-            Title = custom_title.format(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
+            Title = Custom_Title.format(Title=anime, Episode=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["episode_number"], Season=crunchyroll.get_single_info(id)["data"][0]["episode_metadata"]["season_number"],EpTitle=crunchyroll.get_single_info(id)["data"][0]["title"])
         Title = re.sub(r'[<>:\"\'/\\|?*]', '', Title)       
 
         print("Downloading video file...")      
@@ -780,6 +795,7 @@ else:
            aka = 0
 
                 
+
 
 
 

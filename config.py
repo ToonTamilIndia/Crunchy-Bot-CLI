@@ -29,8 +29,9 @@ active_downloads = {} # user_id: True/False (To prevent concurrent downloads per
 
 #debugging
 
-debug = False
-level = ""
+debug = False          # True turns on debug output without passing --debug
+level = "DEBUG"        # Log level when debug is on: DEBUG, INFO, WARNING, ERROR, CRITICAL
+                      # An empty or unrecognised value falls back to DEBUG.
 max_retries = 3 # Number of retries for failed downloads
 retry_delay = 2 # seconds
 download_threads = 8 # Segment download concurrency (lower for fewer failures)
@@ -286,3 +287,4 @@ LANGUAGE_NAME_TO_ISO639_2B = {
     "Yoruba": "yor",
     "Zulu": "zul"
 }
+
