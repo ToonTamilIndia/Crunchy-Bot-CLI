@@ -344,7 +344,13 @@ class CrunchyrollLicense(CrunchyrollBase):
         from pywidevine.cdm import Cdm
         from pywidevine.pssh import PSSH
 
-        device = load_widevine_device()
+        self.last_license_error = None
+        try:
+            device = load_widevine_device()
+        except Exception as error:
+            self.last_license_error = f"Could not load the Widevine device: {error}"
+            return None
+
         cdm = Cdm.from_device(device)
         session_id = cdm.open()
         try:
@@ -364,13 +370,27 @@ class CrunchyrollLicense(CrunchyrollBase):
             }, replace=True)
             response = self.request("post", CR_LICENSE_URL, data=bytes(challenge))
             if response.status_code != 200:
-                print("Error: Failed to get keys")
-                print("Response:", response.text)
-                return
+                self.last_license_error = (
+                    f"License server returned HTTP {response.status_code}: "
+                    f"{response.text[:300]}"
+                )
+                return None
 
-            cdm.parse_license(session_id, base64.b64decode(response.json()["license"]))
-            keys = [{"type": key.type, "kid_hex": key.kid.hex, "key_hex": key.key.hex()} for key in cdm.get_keys(session_id)]
+            try:
+                encoded_license = response.json()["license"]
+            except Exception as error:
+                self.last_license_error = f"License response was not valid JSON: {error}"
+                return None
+
+            cdm.parse_license(session_id, base64.b64decode(encoded_license))
+            keys = [{"type": key.type, "kid_hex": key.kid.hex, "key_hex": key.key.hex} for key in cdm.get_keys(session_id)]
+            if not keys:
+                self.last_license_error = "The license response contained no keys."
+                return None
             return {"key": keys}
+        except Exception as error:
+            self.last_license_error = f"License exchange failed: {error}"
+            return None
         finally:
             cdm.close(session_id)
             if token:
@@ -381,6 +401,35 @@ class CrunchyrollLicense(CrunchyrollBase):
                 }, replace=True)
                 with contextlib.suppress(Exception):
                     self.request("patch", f"{CR_PLAYBACK_TOKEN_BASE}/{content_id}/{token}/inactive", json={})
+
+class LicenseError(RuntimeError):
+    """Raised when a Widevine decryption key cannot be obtained."""
+
+
+def extract_content_key(license_response, context=""):
+    """Pull the decryption key out of a get_license() response.
+
+    get_license() returns None whenever the license request fails (a 5xx, a
+    timeout, a malformed body), so callers that index the result directly raise
+    TypeError. Raising LicenseError with an actionable message instead lets
+    callers skip one episode or one audio track without a traceback.
+    """
+    label = f" for {context}" if context else ""
+    if not license_response:
+        raise LicenseError(
+            f"No decryption license was returned{label}. The license server may be "
+            f"rate-limiting, or the current account may not have access to this title."
+        )
+    keys = license_response.get("key") or []
+    usable = [k for k in keys if k.get("kid_hex") and k.get("key_hex")]
+    if not usable:
+        raise LicenseError(f"The license contained no usable content key{label}.")
+    for key in usable:
+        if str(key.get("type", "")).upper() == "CONTENT":
+            return "{}:{}".format(key["kid_hex"], key["key_hex"])
+    first = usable[0]
+    return "{}:{}".format(first["kid_hex"], first["key_hex"])
+
 
 def resolve_batch_subtitles(selected_languages, track_info_list, locale_map=None):
     """Re-resolve a one-time subtitle choice against one episode's track list.
@@ -2312,7 +2361,16 @@ class Crunchyroll(CrunchyrollBase):
         with contextlib.suppress(Exception):
             self.request("patch", f"{CR_PLAYBACK_TOKEN_BASE}/{content_id}/{video_token}/inactive", json={})
 
-    def _retry_after_active_stream_cleanup(self, response):
+    def _retry_after_active_stream_cleanup(self, response, content_id=None):
+        """Release a stale playback token for the requested title, then retry.
+
+        Crunchyroll refuses a second concurrent stream and lists the ones already
+        running in `activeStreams`. That list belongs to the whole account, so it
+        can include a phone or TV playing something else entirely. Only streams
+        whose contentId matches what we asked for are released; deactivating the
+        rest would interrupt the user's other devices. Entries with no contentId
+        are left alone, since under-releasing only costs one retry.
+        """
         try:
             payload = response.json()
         except Exception:
@@ -2320,11 +2378,26 @@ class Crunchyroll(CrunchyrollBase):
         active_streams = payload.get("activeStreams") or payload.get("active_streams") or []
         if not active_streams:
             return False
+
+        released = set()
         for active_stream in active_streams:
-            content_id = self._first_value(active_stream, "contentId", "content_id")
+            if not isinstance(active_stream, dict):
+                continue
+            stream_content_id = self._first_value(active_stream, "contentId", "content_id")
+            if content_id and stream_content_id and stream_content_id != content_id:
+                cr_debug(f"leaving unrelated active stream {stream_content_id} untouched")
+                continue
+            if stream_content_id is None:
+                continue
             token = self._first_value(active_stream, "token", "Token")
-            self.deauth_video(content_id, token)
-        return True
+            if not token:
+                continue
+            key = (stream_content_id, token)
+            if key in released:
+                continue
+            released.add(key)
+            self.deauth_video(stream_content_id, token)
+        return bool(released)
 
     def get_account_info(self):
         """Retrieve current user account information"""
@@ -2391,7 +2464,7 @@ class Crunchyroll(CrunchyrollBase):
                     return normalized
                 last_response = response
             last_response = response
-            if self._retry_after_active_stream_cleanup(response):
+            if self._retry_after_active_stream_cleanup(response, content_id):
                 cr_debug(f"playback {endpoint}: cleared active stream, retrying")
                 response = self.request("get", playback_url)
                 cr_debug(f"playback {endpoint} retry: status={response.status_code}")

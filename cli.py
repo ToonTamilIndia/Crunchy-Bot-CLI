@@ -15,6 +15,7 @@ from crunchyroll import (
     get_episode_title, parse_episode_selection, set_cr_debug,
     get_download_path, get_encrypted_media_path, get_temp_path,
     resolve_encoding_config, EncodingConfig,
+    extract_content_key, LicenseError,
     resolve_batch_subtitles, resolve_batch_audios, resolve_video_quality,
     dedup_preserving_order,
 )
@@ -218,16 +219,26 @@ if "watch" in video_url:
                 {'audio_locale': locale_map.get(video_info['versions'][choice]['audio_locale'], video_info['versions'][choice]['audio_locale']), 'guid': video_info['versions'][choice]['guid']}
                 for choice in audio_list
             ]
-    license_key = CrunchyrollLicense().get_license(pssh, token, id, crunchyroll.token) ["key"]
-    for i in license_key:
-          key = "{}:{}".format(i["kid_hex"], i["key_hex"])  
+    license_handler = CrunchyrollLicense()
+    try:
+        key = extract_content_key(
+            license_handler.get_license(pssh, token, id, crunchyroll.token), Title
+        )
+    except LicenseError as exc:
+        print(f"[ERROR] {exc}")
+        exit()
 
     for audio in selected_audios:
         info = crunchyroll.get_video_info(audio['guid'])
         pssh, mpd_content, token = crunchyroll.get_pssh(info)
-        license_key = CrunchyrollLicense().get_license(pssh, token, audio['guid'], crunchyroll.token) ["key"]
-        for i in license_key:
-            audio['key'] = "{}:{}".format(i["kid_hex"], i["key_hex"])
+        try:
+            audio['key'] = extract_content_key(
+                license_handler.get_license(pssh, token, audio['guid'], crunchyroll.token),
+                audio.get('audio_locale', audio['guid']),
+            )
+        except LicenseError as exc:
+            print(f"[WARN] Skipping audio track: {exc}")
+            continue
         video_list, audio_list = parse_mpd_content(mpd_content)
         highest_audio = max(audio_list, key=lambda x: x['bandwidth'], default=None)
         if highest_audio:
@@ -545,16 +556,26 @@ else:
             print("No requested audio track is available for this episode. Skipping.")
             continue
 
-        license_key = CrunchyrollLicense().get_license(pssh, token, id, crunchyroll.token) ["key"]
-        for i in license_key:
-              key = "{}:{}".format(i["kid_hex"], i["key_hex"])      
+        license_handler = CrunchyrollLicense()
+        try:
+            key = extract_content_key(
+                license_handler.get_license(pssh, token, id, crunchyroll.token), Title
+            )
+        except LicenseError as exc:
+            print(f"{ep_num_str}: {exc} Skipping.")
+            continue
 
         for audio in selected_audios:
             info = crunchyroll.get_video_info(audio['guid'])
             pssh, mpd_content, token = crunchyroll.get_pssh(info)
-            license_key = CrunchyrollLicense().get_license(pssh, token, audio['guid'], crunchyroll.token) ["key"]
-            for i in license_key:
-                audio['key'] = "{}:{}".format(i["kid_hex"], i["key_hex"])
+            try:
+                audio['key'] = extract_content_key(
+                    license_handler.get_license(pssh, token, audio['guid'], crunchyroll.token),
+                    audio.get('audio_locale', audio['guid']),
+                )
+            except LicenseError as exc:
+                print(f"[WARN] Skipping audio track: {exc}")
+                continue
             video_list, audio_list = parse_mpd_content(mpd_content)
             highest_audio = max(audio_list, key=lambda x: x['bandwidth'], default=None)
             if highest_audio:
@@ -759,5 +780,6 @@ else:
            aka = 0
 
                 
+
 
 
