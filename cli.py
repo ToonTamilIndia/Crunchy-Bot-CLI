@@ -236,6 +236,7 @@ if "watch" in video_url:
         key = extract_content_key(
             license_handler.get_license(pssh, token, id, crunchyroll.token),
             f"episode {id}",
+            video.get("kid"),
         )
     except LicenseError as exc:
         print(f"[ERROR] {exc}")
@@ -244,16 +245,17 @@ if "watch" in video_url:
     for audio in selected_audios:
         info = crunchyroll.get_video_info(audio['guid'])
         pssh, mpd_content, token = crunchyroll.get_pssh(info)
+        video_list, audio_list = parse_mpd_content(mpd_content)
+        highest_audio = max(audio_list, key=lambda x: x['bandwidth'], default=None)
         try:
             audio['key'] = extract_content_key(
                 license_handler.get_license(pssh, token, audio['guid'], crunchyroll.token),
                 audio.get('audio_locale', audio['guid']),
+                (highest_audio or {}).get('kid'),
             )
         except LicenseError as exc:
             print(f"[WARN] Skipping audio track: {exc}")
             continue
-        video_list, audio_list = parse_mpd_content(mpd_content)
-        highest_audio = max(audio_list, key=lambda x: x['bandwidth'], default=None)
         if highest_audio:
             audseg = get_segment_link_list(mpd_content, highest_audio['name'], highest_audio['base_url'])
             audio['segment'] = audseg
@@ -570,6 +572,7 @@ else:
             key = extract_content_key(
                 license_handler.get_license(pssh, token, id, crunchyroll.token),
                 f"episode {download_index}/{len(selected_episode_indices)}",
+                video.get("kid"),
             )
         except LicenseError as exc:
             print(f"[WARN] Skipping episode {download_index}/{len(selected_episode_indices)}: {exc}")
@@ -578,16 +581,17 @@ else:
         for audio in selected_audios:
             info = crunchyroll.get_video_info(audio['guid'])
             pssh, mpd_content, token = crunchyroll.get_pssh(info)
+            video_list, audio_list = parse_mpd_content(mpd_content)
+            highest_audio = max(audio_list, key=lambda x: x['bandwidth'], default=None)
             try:
                 audio['key'] = extract_content_key(
                     license_handler.get_license(pssh, token, audio['guid'], crunchyroll.token),
                     audio.get('audio_locale', audio['guid']),
+                    (highest_audio or {}).get('kid'),
                 )
             except LicenseError as exc:
                 print(f"[WARN] Skipping audio track: {exc}")
                 continue
-            video_list, audio_list = parse_mpd_content(mpd_content)
-            highest_audio = max(audio_list, key=lambda x: x['bandwidth'], default=None)
             if highest_audio:
                 audseg = get_segment_link_list(mpd_content, highest_audio['name'], highest_audio['base_url'])
                 audio['segment'] = audseg
@@ -790,6 +794,7 @@ else:
            aka = 0
 
                 
+
 
 
 

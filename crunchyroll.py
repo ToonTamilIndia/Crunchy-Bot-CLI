@@ -554,7 +554,7 @@ class CrunchyrollLicense(CrunchyrollBase):
                 return None
 
             cdm.parse_license(session_id, base64.b64decode(encoded_license))
-            keys = [{"type": key.type, "kid_hex": key.kid.hex, "key_hex": key.key.hex} for key in cdm.get_keys(session_id)]
+            keys = build_license_key_entries(cdm.get_keys(session_id))
             if not keys:
                 self.last_license_error = "The license response contained no keys."
                 return None
@@ -577,13 +577,19 @@ class LicenseError(RuntimeError):
     """Raised when a Widevine decryption key cannot be obtained."""
 
 
-def extract_content_key(license_response, context=""):
+def extract_content_key(license_response, context="", kid=None):
     """Pull the decryption key out of a get_license() response.
 
     get_license() returns None whenever the license request fails (a 5xx, a
     timeout, a malformed body), so callers that index the result directly raise
     TypeError. Raising LicenseError with an actionable message instead lets
     callers skip one episode or one audio track without a traceback.
+
+    A single license covers every track, so it carries one key per rendition
+    and they are all typed CONTENT. `kid` is the track's default_KID from the
+    MPD; matching on it is the only reliable way to tell the video key from an
+    audio key. Without it, "the first CONTENT key" silently hands the video
+    track an audio key and the result decodes as corrupt frames.
     """
     label = f" for {context}" if context else ""
     if not license_response:
@@ -595,11 +601,57 @@ def extract_content_key(license_response, context=""):
     usable = [k for k in keys if k.get("kid_hex") and k.get("key_hex")]
     if not usable:
         raise LicenseError(f"The license contained no usable content key{label}.")
+
+    wanted = normalize_kid(kid) if kid else None
+    if wanted:
+        for key in usable:
+            if normalize_kid(key.get("kid_hex")) == wanted:
+                return "{}:{}".format(key["kid_hex"], key["key_hex"])
+        raise LicenseError(
+            f"The license returned {len(usable)} key(s) but none matched this "
+            f"track's key ID{label}. The track stayed encrypted, so it would "
+            f"decode as corrupt frames."
+        )
+
     for key in usable:
         if str(key.get("type", "")).upper() == "CONTENT":
             return "{}:{}".format(key["kid_hex"], key["key_hex"])
     first = usable[0]
     return "{}:{}".format(first["kid_hex"], first["key_hex"])
+
+
+def build_license_key_entries(cdm_keys):
+    """Convert pywidevine Key objects into the payload extract_content_key reads.
+
+    pywidevine stores ``kid`` as a uuid.UUID, whose ``.hex`` is a *property*,
+    but ``key`` as bytes, whose ``.hex`` is a *method*. Writing ``key.key.hex``
+    without the parentheses puts a bound-method repr into the payload, so every
+    caller ends up asking mp4decrypt for
+    "<valid kid>:<built-in method hex of bytes object at 0x...>". mp4decrypt
+    cannot use that, the track stays encrypted, and ffmpeg decodes ciphertext.
+    """
+    entries = []
+    for key in cdm_keys:
+        kid = key.kid
+        raw = key.key
+        kid_hex = kid.hex if hasattr(kid, "hex") else str(kid)
+        if callable(kid_hex):
+            kid_hex = kid_hex()
+        key_hex = raw.hex() if isinstance(raw, (bytes, bytearray, memoryview)) else raw
+        entries.append({
+            "type": getattr(key, "type", None),
+            "kid_hex": kid_hex,
+            "key_hex": key_hex,
+            "permissions": list(getattr(key, "permissions", []) or []),
+        })
+    return entries
+
+
+def normalize_kid(value):
+    """Compare key IDs case- and separator-insensitively."""
+    if value is None:
+        return ""
+    return re.sub(r"[^0-9a-f]", "", str(value).lower())
 
 
 def resolve_batch_subtitles(selected_languages, track_info_list, locale_map=None):
@@ -1027,24 +1079,57 @@ def parse_mpd_content(mpd_content):
 
         base_url = get_mpd_base_url(elem)
 
+        entry = {
+            "name": rep_id,
+            "bandwidth": bandwidth,
+            "width": width,
+            "height": height,
+            "codecs": codecs,
+            "base_url": base_url
+        }
+        # Every track in a license has its own key, so the caller needs to know
+        # which key ID belongs to which rendition to pick the right one. It is
+        # absent on unencrypted (free) renditions, which is not an error.
+        kid = get_track_kid(elem)
+        if kid:
+            entry["kid"] = kid
+
         if width and height:
-            video_list.append({
-                "name": rep_id,
-                "bandwidth": bandwidth,
-                "width": width,
-                "height": height,
-                "codecs": codecs,
-                "base_url": base_url
-            })
+            video_list.append(entry)
         else:
-            audio_list.append({
-                "name": rep_id,
-                "bandwidth": bandwidth,
-                "codecs": codecs,
-                "base_url": base_url
-            })
+            audio_list.append(entry)
 
     return video_list, audio_list
+
+
+def get_track_kid(element):
+    """The default_KID for a Representation, falling back to its AdaptationSet.
+
+    Crunchyroll namespaces the attribute, and the key can sit on either the
+    Representation or the parent AdaptationSet, so match on the local name.
+    """
+    scopes = [element]
+    parent = element.getparent()
+    if parent is not None:
+        scopes.append(parent)
+
+    for scope in scopes:
+        # The attribute may sit directly on the AdaptationSet/Representation...
+        for attr, value in scope.attrib.items():
+            if attr.split("}")[-1].lower() == "default_kid":
+                kid = re.sub(r"[^0-9a-f]", "", value.lower())
+                if len(kid) == 32:
+                    return kid
+        # ...or on a nested cenc:ContentProtection element.
+        for node in scope.iter():
+            if not node.tag.endswith("ContentProtection"):
+                continue
+            for attr, value in node.attrib.items():
+                if attr.split("}")[-1].lower() == "default_kid":
+                    kid = re.sub(r"[^0-9a-f]", "", value.lower())
+                    if len(kid) == 32:
+                        return kid
+    return None
 
 def parse_mpd_logic(content):
     try:
@@ -2695,6 +2780,7 @@ def find_guid_by_locale(data, locale):
         if audio_locale == "en-US":
             en_us_guid = guid
     return en_us_guid
+
 
 
 
