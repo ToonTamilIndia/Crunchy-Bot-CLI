@@ -1201,16 +1201,16 @@ def process_download(client, user_id):
                 title = f"{base_anime_title}.S{season_num}E{ep_num}-{ep_title_str}"
                 if use_custom_title:
                     try:
-                        title = custom_title.format(
+                        title = Custom_Title.format(
                             Title=base_anime_title,
                             Episode=ep_num,
                             Season=season_num,
                             EpTitle=ep_title_str
                         )
                     except AttributeError:
-                        print("Warning: `custom_title` object does not have `.format` method or config is missing.")
+                        print("Warning: `Custom_Title` in config.py must be a format string.")
                     except KeyError as ke:
-                        print(f"Warning: Missing key in custom_title format: {ke}")
+                        print(f"Warning: Missing key in Custom_Title format: {ke}")
 
                 title = re.sub(r'[<>:\"\'/\\|?*]', '', title)
 
@@ -1306,7 +1306,7 @@ def process_download(client, user_id):
             title = f"{anime}.S{season_num}E{ep_num}-{ep_title_str}"
             if use_custom_title:
                 try:
-                    title = custom_title.format(Title=anime, Episode=ep_num, Season=season_num, EpTitle=ep_title_str)
+                    title = Custom_Title.format(Title=anime, Episode=ep_num, Season=season_num, EpTitle=ep_title_str)
                 except AttributeError:
                     pass
                 except KeyError:
@@ -1563,4 +1563,5 @@ if __name__ == "__main__":
     print("Starting bot...")
     app.run()
     print("Bot stopped.")
+
 
