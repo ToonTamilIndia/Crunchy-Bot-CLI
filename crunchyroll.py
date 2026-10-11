@@ -19,6 +19,8 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import shutil
 
+from platform_tools import OperationCancelled, cancelled, run_cancellable
+
 CR_API_BASE = "https://beta-api.crunchyroll.com"
 CR_ETP_TOKEN_URL = "https://www.crunchyroll.com/auth/v1/token"
 CR_SSO_LOGIN_URL = "https://sso.crunchyroll.com/api/login"
@@ -761,10 +763,13 @@ def parse_content_range_total(header_text):
     return int(match.group(1))
 
 
-def download_segment(segment_links, name, format, max_threads=20, headers=None, user_agent=None):
+def download_segment(segment_links, name, format, max_threads=20, headers=None,
+                     user_agent=None, cancel_event=None):
     # Always start from an empty scratch directory. Leftover parts from a previous
     # failed run would otherwise be resumed and concatenated into the output,
     # because multi-segment parts carry no expected length to validate against.
+    if cancelled(cancel_event):
+        raise OperationCancelled("download cancelled before it started")
     shutil.rmtree(get_segment_temp_dir(name), ignore_errors=True)
     base_temp_dir = get_segment_temp_dir(name)
     output_path = get_encrypted_media_path(name, format)
@@ -828,8 +833,9 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
         # Resume when a partial file exists; fall back to a clean fetch when the
         # server rejects byte ranges, otherwise the resume would never progress.
         if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-            result = subprocess.run(
+            result = run_cancellable(
                 build_curl_cmd(url, temp_path, stall_time, resume=True),
+                cancel_event=cancel_event,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
@@ -837,8 +843,9 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
                 return result
             with contextlib.suppress(Exception):
                 os.remove(temp_path)
-        return subprocess.run(
+        return run_cancellable(
             build_curl_cmd(url, temp_path, stall_time, resume=False),
+            cancel_event=cancel_event,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -847,8 +854,9 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
         start, end = byte_range
         cmd = build_curl_cmd(url, temp_path, stall_time, resume=False)
         cmd.extend(["-r", f"{start}-{end}"])
-        result = subprocess.run(
+        result = run_cancellable(
             cmd,
+            cancel_event=cancel_event,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -939,13 +947,24 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
         return False
 
     def download_task(index, task):
+        if cancelled(cancel_event):
+            raise OperationCancelled("download cancelled")
         attempts = _config_int("max_retries", 3, minimum=1)
         delay = _config_float("retry_delay", 2, minimum=0)
         for retry in range(attempts):
+            if cancelled(cancel_event):
+                raise OperationCancelled("download cancelled")
             if fetch_task(task, "30"):
                 return index, True
+            if cancelled(cancel_event):
+                raise OperationCancelled("download cancelled")
             backoff = delay * (2 ** retry)
-            time.sleep(backoff + random.uniform(0.0, 0.5))
+            # Sleep in slices so a cancel does not wait out the whole backoff.
+            deadline = time.time() + backoff
+            while time.time() < deadline:
+                if cancelled(cancel_event):
+                    raise OperationCancelled("download cancelled")
+                time.sleep(0.2)
             print(f"[WARN] Segment {index} failed retrying ({retry + 1}/{attempts}).")
         with contextlib.suppress(Exception):
             os.remove(task["path"])
@@ -959,6 +978,8 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None, 
 
         for future in as_completed(future_to_index):
             index, ok = future.result()
+            if cancelled(cancel_event):
+                raise OperationCancelled("download cancelled mid-flight")
             if not ok:
                 failed_segments.append((index, tasks[index]["url"]))
             progress_bar.update(1)

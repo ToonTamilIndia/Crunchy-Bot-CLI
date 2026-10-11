@@ -94,19 +94,19 @@ def download_file(url, destination):
         output.write(response.content)
 
 
-def decrypt_file(source, destination, key):
+def decrypt_file(source, destination, key, cancel_event=None):
     tool = resolve_executable("mp4decrypt")
     command = [tool, source, destination, "--show-progress", "--key", key]
-    result = run_command(command)
+    result = run_command(command, cancel_event=cancel_event)
     if result.returncode != 0:
         raise RuntimeError(f"mp4decrypt failed ({result.returncode}): {display_command(command)}")
 
 
-def run_ffmpeg(command):
+def run_ffmpeg(command, cancel_event=None):
     if isinstance(command, str):
         command = split_command(command)
     print("ffmpeg command:", display_command(command))
-    result = run_command(command)
+    result = run_command(command, cancel_event=cancel_event)
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg failed with exit code {result.returncode}")
 

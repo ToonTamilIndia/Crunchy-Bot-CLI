@@ -9,7 +9,11 @@ import math
 from hachoir.metadata import extractMetadata
 from hachoir.parser import createParser
 import subprocess
-from platform_tools import display_command, resolve_executable, run_command, split_command
+import uuid
+
+from platform_tools import (
+    display_command, resolve_executable, run_command, split_command, OperationCancelled,
+)
 
 from crunchyroll import (
     Crunchyroll, CrunchyrollAuth, CrunchyrollLicense,
@@ -255,8 +259,33 @@ def check_user_tier(tier="regular"):
 # "is this still the confirm_download step?" cannot interleave.
 _state_lock = threading.RLock()
 
-# Users who asked to cancel while a worker thread was mid-download.
-cancelled_users = set()
+# Jobs the user asked to cancel. Keyed by an immutable job id rather than by
+# user id: a user id is reusable, so cancelling A and then starting B used to
+# clear A's flag, because begin_active_download() discarded the user id and a
+# straggling worker then read "not cancelled" and kept downloading.
+cancelled_jobs = set()
+
+# Events a media stage polls so a cancel reaches curl/ffmpeg instead of only
+# being observed at the next episode boundary.
+cancel_events = {}
+
+
+def session_nonce(state):
+    return (state or {}).get("nonce") or ""
+
+
+def cb(action, state=None):
+    """Stamp a callback with the session nonce so stale buttons are rejected."""
+    nonce = session_nonce(state if state is not None else None)
+    return f"{action}|{nonce}" if nonce else action
+
+
+def split_callback(data):
+    """Return (action, nonce) for a stamped callback."""
+    if isinstance(data, str) and "|" in data:
+        action, _, nonce = data.rpartition("|")
+        return action, nonce
+    return data, None
 
 
 def get_active_download(user_id):
@@ -278,8 +307,12 @@ def begin_active_download(user_id, expected_step):
         if config_value("active_downloads").get(user_id):
             return False
         state["step"] = "downloading"
+        # A fresh job id per run; it is never reused, so a new job cannot clear
+        # an older job's cancellation.
+        state["job_id"] = uuid.uuid4().hex
+        state["cancel_event"] = threading.Event()
+        cancel_events[state["job_id"]] = state["cancel_event"]
         config_value("active_downloads")[user_id] = state
-        cancelled_users.discard(user_id)
         return True
 
 
@@ -291,31 +324,55 @@ def finish_active_download(user_id, expected_state):
     the cancelled run leaves the new session's state and guard untouched.
     """
     with _state_lock:
-        if expected_state is None:
+        if expected_state is not None:
+            current = config_value("user_states").get(user_id)
+            if current is expected_state:
+                config_value("user_states").pop(user_id, None)
+            if config_value("active_downloads").get(user_id) is expected_state:
+                config_value("active_downloads").pop(user_id, None)
+        else:
             config_value("user_states").pop(user_id, None)
             config_value("active_downloads").pop(user_id, None)
-            cancelled_users.discard(user_id)
-            return
-        current = config_value("user_states").get(user_id)
-        if current is expected_state:
-            config_value("user_states").pop(user_id, None)
-        if config_value("active_downloads").get(user_id) is expected_state:
-            config_value("active_downloads").pop(user_id, None)
-            cancelled_users.discard(user_id)
+        job_id = (expected_state or {}).get("job_id")
+        event = (expected_state or {}).get("cancel_event")
+        if job_id:
+            cancelled_jobs.discard(job_id)          # job finished cleanly
+        if event is not None:
+            cancel_events.pop(job_id, None)
 
 
 def request_cancel(user_id):
-    """Flag an in-flight download as cancelled and drop the visible session."""
+    """Flag the in-flight job as cancelled and drop the visible session.
+
+    The flag is recorded against that job's id and its event is set so running
+    curl/ffmpeg processes can be torn down, not just loop iterations.
+    """
     with _state_lock:
-        cancelled_users.add(user_id)
-        state = config_value("user_states").pop(user_id, None)
+        state = (config_value("user_states").get(user_id)
+                 or config_value("active_downloads").get(user_id))
+        job_id = (state or {}).get("job_id")
+        if job_id:
+            cancelled_jobs.add(job_id)
+        if state:
+            event = state.get("cancel_event")
+            if event is not None:
+                event.set()
+        config_value("user_states").pop(user_id, None)
         config_value("active_downloads").pop(user_id, None)
         return state
 
 
-def is_cancelled(user_id):
+def is_job_cancelled(job_id):
+    """True when this exact job was cancelled (never any other job)."""
+    if not job_id:
+        return False
     with _state_lock:
-        return user_id in cancelled_users
+        return job_id in cancelled_jobs
+
+
+def job_cancel_event(job_id):
+    with _state_lock:
+        return cancel_events.get(job_id)
 
 
 def check_active_download(func):
@@ -336,10 +393,19 @@ def check_active_download(func):
         return func(client, update)
     return wrapper
 
-def run_shell_command(command):
+def run_shell_command(command, cancel_event=None):
+    """Run a media command, killing it promptly when the job is cancelled.
+
+    Decryption and muxing are the slowest stages; without this a cancel was
+    only noticed once ffmpeg or mp4decrypt had already finished.
+    """
     if isinstance(command, str):
         command = split_command(command)
-    result = run_command(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        result = run_command(command, cancel_event=cancel_event,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except OperationCancelled as exc:
+        return "", str(exc), -1
     return result.stdout, result.stderr, result.returncode
 
 def edit_message(message: Message, text: str, keyboard: InlineKeyboardMarkup = None):
@@ -560,10 +626,10 @@ def show_search_results(client, user_id, query_text, status_msg):
     state["data"]["search_results"] = search_results
 
     buttons = [
-        [InlineKeyboardButton(search_button_label(result), callback_data=f"search_{index}")]
+        [InlineKeyboardButton(search_button_label(result), callback_data=cb(f"search_{index}", state))]
         for index, result in enumerate(search_results)
     ]
-    buttons.append([InlineKeyboardButton("Cancel", callback_data="cancel")])
+    buttons.append([InlineKeyboardButton("Cancel", callback_data=cb("cancel", state))])
 
     edit_message(
         status_msg,
@@ -660,7 +726,7 @@ def process_download_url(client, user_id, video_url, status_msg):
                 f"Found series '{series_title}' with {len(episodes)} episodes.\n"
                 + "\n".join(preview_lines)
                 + "\n\nSend episodes: `10`, `1,2,3,5`, `1-10`, or `all`.",
-                keyboard=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="cancel")]])
+                keyboard=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data=cb("cancel", state))]])
             )
 
         else:
@@ -726,7 +792,10 @@ def download_command(client, message: Message):
             "url": video_url,
             "data": {},
             "message": message.reply_text("Processing URL..."),
-            "is_series": False
+            "is_series": False,
+            # Identifies this session. Buttons carry it so a tap on an old
+            # keyboard cannot advance whatever session is current now.
+            "nonce": uuid.uuid4().hex[:12],
         }
         status_msg = config_value("user_states")[user_id]["message"]
 
@@ -808,14 +877,14 @@ def ask_video_quality(client, user_id):
         height = int(video.get('height', 0))
         if height <= max_quality_p:
             label = f"{height}p ({int(video.get('bandwidth', 0)) // 1000} kbps)"
-            buttons.append([InlineKeyboardButton(label, callback_data=f"quality_{i}")])
+            buttons.append([InlineKeyboardButton(label, callback_data=cb(f"quality_{i}", state))])
 
     if not buttons:
         edit_message(status_msg, "No video qualities available within your limits.")
         del config_value("user_states")[user_id]
         return
 
-    buttons.append([InlineKeyboardButton("Cancel", callback_data="cancel")])
+    buttons.append([InlineKeyboardButton("Cancel", callback_data=cb("cancel", state))])
     keyboard = InlineKeyboardMarkup(buttons)
     state["step"] = "select_quality"
     edit_message(status_msg, "Select video quality:", keyboard=keyboard)
@@ -844,12 +913,12 @@ def ask_audio_language(client, user_id):
         guid = version['guid']
         lang_name = config_value("locale_map").get(locale, locale)
         audio_options[guid] = locale
-        buttons.append([InlineKeyboardButton(lang_name, callback_data=f"audio_{guid}")])
+        buttons.append([InlineKeyboardButton(lang_name, callback_data=cb(f"audio_{guid}", state))])
 
     state["data"]["available_audio_options"] = audio_options
 
     buttons.append([
-        InlineKeyboardButton(f"Done (0/{max_audios if max_audios != float('inf') else '∞'})", callback_data="audio_done"),
+        InlineKeyboardButton(f"Done (0/{max_audios if max_audios != float('inf') else '∞'})", callback_data=cb("audio_done", state)),
         InlineKeyboardButton("Cancel", callback_data="cancel")
     ])
     keyboard = InlineKeyboardMarkup(buttons)
@@ -906,10 +975,10 @@ def ask_subtitles(client, user_id):
 
     buttons = []
     for i, track in enumerate(track_info_list):
-        buttons.append([InlineKeyboardButton(available_tracks[i], callback_data=f"sub_{i}")])
+        buttons.append([InlineKeyboardButton(available_tracks[i], callback_data=cb(f"sub_{i}", state))])
 
     buttons.append([
-        InlineKeyboardButton("Done (0 selected)", callback_data="sub_done"),
+        InlineKeyboardButton("Done (0 selected)", callback_data=cb("sub_done", state)),
         InlineKeyboardButton("Cancel", callback_data="cancel")
     ])
     keyboard = InlineKeyboardMarkup(buttons)
@@ -952,8 +1021,8 @@ def confirm_download(client, user_id):
     subs_text = ', '.join([f"{s['language']} ({s['format']})" for s in sel_subs]) if sel_subs else 'None'
     summary += f"Subtitles: {subs_text}\n"
     buttons = [
-        [InlineKeyboardButton("Start Download", callback_data="confirm_start")],
-        [InlineKeyboardButton("Cancel", callback_data="cancel")]
+        [InlineKeyboardButton("Start Download", callback_data=cb("confirm_start", state))],
+        [InlineKeyboardButton("Cancel", callback_data=cb("cancel", state))]
     ]
     keyboard = InlineKeyboardMarkup(buttons)
     state["step"] = "confirm_download"
@@ -976,15 +1045,24 @@ def handle_callback_query(client, query: CallbackQuery):
     status_msg = state["message"]
     step = state["step"]
 
+    # A keyboard from a previous session carries that session's nonce. Without
+    # this check a tap on an old "Start Download" advances the session that
+    # happens to be current now, which is not what the user was looking at.
+    action, nonce = split_callback(data)
+    if nonce is not None and nonce != session_nonce(state):
+        query.answer("This selection is from an earlier request. Please start again.",
+                     show_alert=True)
+        return
+
     try:
-        if data == "cancel":
+        if action == "cancel":
             query.answer("Cancelled")
             edit_message(status_msg, "Download process cancelled.")
             request_cancel(user_id)
             return
 
-        if step == "select_search" and data.startswith("search_"):
-            search_index = int(data.split("_")[1])
+        if step == "select_search" and action.startswith("search_"):
+            search_index = int(action.split("_")[1])
             search_results = state["data"].get("search_results", [])
             if search_index < 0 or search_index >= len(search_results):
                 query.answer("Invalid search result.", show_alert=True)
@@ -999,8 +1077,8 @@ def handle_callback_query(client, query: CallbackQuery):
             process_download_url(client, user_id, selected["url"], status_msg)
             return
 
-        if step == "select_quality" and data.startswith("quality_"):
-            quality_index = int(data.split("_")[1])
+        if step == "select_quality" and action.startswith("quality_"):
+            quality_index = int(action.split("_")[1])
             qualities = state["data"].get("available_video_qualities", [])
             if quality_index < 0 or quality_index >= len(qualities):
                 query.answer("That quality is no longer available.", show_alert=True)
@@ -1013,7 +1091,7 @@ def handle_callback_query(client, query: CallbackQuery):
         elif step == "select_audio":
             max_audios, _ = get_user_limits(user_id)
 
-            if data == "audio_done":
+            if action == "audio_done":
                 if not state["data"]["selected_audios"]:
                     query.answer("Proceeding without audio selection.")
                 else:
@@ -1021,8 +1099,8 @@ def handle_callback_query(client, query: CallbackQuery):
                 ask_subtitles(client, user_id)
                 return
 
-            elif data.startswith("audio_"):
-                guid = data.split("_")[1]
+            elif action.startswith("audio_"):
+                guid = action.split("_")[1]
                 locale_name = config_value("locale_map").get(state["data"]["available_audio_options"][guid], state["data"]["available_audio_options"][guid])
 
                 already_selected = False
@@ -1048,22 +1126,22 @@ def handle_callback_query(client, query: CallbackQuery):
                 for btn_guid, btn_locale in state["data"]["available_audio_options"].items():
                     btn_lang_name = config_value("locale_map").get(btn_locale, btn_locale)
                     prefix = "✅ " if btn_guid in selected_guids else ""
-                    buttons.append([InlineKeyboardButton(f"{prefix}{btn_lang_name}", callback_data=f"audio_{btn_guid}")])
+                    buttons.append([InlineKeyboardButton(f"{prefix}{btn_lang_name}", callback_data=cb(f"audio_{btn_guid}", state))])
 
                 buttons.append([
-                    InlineKeyboardButton(f"Done ({current_selection_count}/{max_audios if max_audios != float('inf') else '∞'})", callback_data="audio_done"),
+                    InlineKeyboardButton(f"Done ({current_selection_count}/{max_audios if max_audios != float('inf') else '∞'})", callback_data=cb("audio_done", state)),
                     InlineKeyboardButton("Cancel", callback_data="cancel")
                 ])
                 query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
 
         elif step == "select_subtitles":
 
-            if data == "sub_done":
+            if action == "sub_done":
                 query.answer("Subtitle selection complete.")
                 confirm_download(client, user_id)
                 return
-            elif data.startswith("sub_"):
-                sub_index = int(data.split("_")[1])
+            elif action.startswith("sub_"):
+                sub_index = int(action.split("_")[1])
                 subtitle_options = state["data"].get("available_subtitle_options", [])
                 if sub_index < 0 or sub_index >= len(subtitle_options):
                     query.answer("That subtitle track is no longer available.", show_alert=True)
@@ -1100,15 +1178,15 @@ def handle_callback_query(client, query: CallbackQuery):
                     type_tag = type_labels.get(track['type'], track['type'].upper())
                     label = f"[{type_tag}] {track['display_name']}"
                     prefix = "✅ " if track['url'] in selected_urls else ""
-                    buttons.append([InlineKeyboardButton(f"{prefix}{label}", callback_data=f"sub_{i}")])
+                    buttons.append([InlineKeyboardButton(f"{prefix}{label}", callback_data=cb(f"sub_{i}", state))])
 
                 buttons.append([
-                    InlineKeyboardButton(f"Done ({current_selection_count} selected)", callback_data="sub_done"),
+                    InlineKeyboardButton(f"Done ({current_selection_count} selected)", callback_data=cb("sub_done", state)),
                     InlineKeyboardButton("Cancel", callback_data="cancel")
                 ])
                 query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
 
-        elif step == "confirm_download" and data == "confirm_start":
+        elif step == "confirm_download" and action == "confirm_start":
             # Claim the transition atomically: a double-tapped button must not
             # start the same job twice on two worker threads.
             if not begin_active_download(user_id, "confirm_download"):
@@ -1142,6 +1220,12 @@ def process_download(client, user_id):
             config_value("active_downloads").pop(user_id, None)
         return
 
+    # Capture the job identity once. Later checks compare this, so a cancel for
+    # a newer job can never be mistaken for this one (or vice versa).
+    job_id = state.get("job_id")
+    cancel_event = state.get("cancel_event")
+    # Media stages poll this so a cancel tears down curl/ffmpeg immediately
+    # instead of only being noticed at the next episode boundary.
     status_msg = state["message"]
     is_series = state["is_series"]
     final_output_files = []
@@ -1158,7 +1242,7 @@ def process_download(client, user_id):
             edit_message(status_msg, f"Starting batch download for '{series_anime_title}' ({total_episodes} episodes)...")
 
             for i, episode_info in enumerate(episodes_to_download):
-                if is_cancelled(user_id):
+                if is_job_cancelled(job_id):
                     edit_message(status_msg, "Download cancelled by user.")
                     return
                 ep_num_str = f"Episode {i+1}/{total_episodes}"
@@ -1308,7 +1392,8 @@ def process_download(client, user_id):
                     selected_video_quality,
                     temp_files,
                     output_directory=series_output_dir,
-                    progress_prefix=f"{ep_num_str}: "
+                    progress_prefix=f"{ep_num_str}: ",
+                    cancel_event=cancel_event,
                 )
 
                 if final_ep_output:
@@ -1415,7 +1500,8 @@ def process_download(client, user_id):
                 client, user_id, status_msg,
                 title, vidseg, video_key_str,
                 detailed_audios, selected_subtitles,
-                selected_video_quality, temp_files
+                selected_video_quality, temp_files,
+                cancel_event=cancel_event,
             )
 
             if final_output_path:
@@ -1444,7 +1530,7 @@ def process_download(client, user_id):
 def download_decrypt_merge_single(
     client, user_id, status_msg, title, vidseg, video_key_str,
     detailed_audios, selected_subtitles, video_quality_info, temp_files,
-    output_directory="", progress_prefix=""
+    output_directory="", progress_prefix="", cancel_event=None
 ):
 
     if output_directory:
@@ -1466,14 +1552,16 @@ def download_decrypt_merge_single(
     try:
         edit_message(status_msg, f"{progress_prefix}Downloading video... \n\n `{dec_video_path}` \n\n P.S: It takes few minutes to download depending on the quality of the video selected.")
         segment_headers = {"User-Agent": auth.playback_user_agent}
-        download_segment(vidseg["all"], f"enc_{title}", "mp4", headers=segment_headers)
+        download_segment(vidseg["all"], f"enc_{title}", "mp4", headers=segment_headers,
+                        cancel_event=cancel_event)
         edit_message(status_msg, f"{progress_prefix}Video download complete.")
 
         for i, audio in enumerate(detailed_audios):
             locale = audio['audio_locale']
             edit_message(status_msg, f"{progress_prefix}Downloading audio {i+1}/{len(detailed_audios)} ({locale})... \n\n `{title}_{locale}.m4a` \n\n P.S: It takes few minutes to download depending on the number of audio selected.")
             enc_audio_base = f"enc_{title}_{locale}"
-            download_segment(audio['segment']["all"], enc_audio_base, "m4a", headers=segment_headers)
+            download_segment(audio['segment']["all"], enc_audio_base, "m4a", headers=segment_headers,
+                            cancel_event=cancel_event)
             temp_files.append(get_temp_path(enc_audio_base))
             edit_message(status_msg, f"{progress_prefix}Audio '{locale}' download complete.")
 
@@ -1487,7 +1575,7 @@ def download_decrypt_merge_single(
                 sub_final_path = os.path.join(temp_job_dir, f"{title}_{sub_lang}.srt")
 
                 curl_cmd = [resolve_executable("curl", project_fallback=False), "-fsSL", "-o", sub_temp_path, sub_url]
-                _, stderr, retcode = run_shell_command(curl_cmd)
+                _, stderr, retcode = run_shell_command(curl_cmd, cancel_event=cancel_event)
                 if retcode != 0:
                     print(f"Subtitle download failed for {sub_lang}: {stderr}")
                     continue
@@ -1509,7 +1597,7 @@ def download_decrypt_merge_single(
         edit_message(status_msg, f"{progress_prefix}Decrypting video...")
         enc_video_path = get_encrypted_media_path(f"enc_{title}", "mp4")
         decrypt_cmd = [resolve_executable("mp4decrypt"), enc_video_path, dec_video_path, "--show-progress", "--key", video_key_str]
-        _, stderr, retcode = run_shell_command(decrypt_cmd)
+        _, stderr, retcode = run_shell_command(decrypt_cmd, cancel_event=cancel_event)
         if retcode != 0:
             raise Exception(f"Video decryption failed: {stderr}")
         edit_message(status_msg, f"{progress_prefix}Video decryption complete.")
@@ -1520,7 +1608,7 @@ def download_decrypt_merge_single(
             enc_audio_path = get_encrypted_media_path(f"enc_{title}_{locale}", "m4a")
             dec_audio_path = os.path.join(temp_job_dir, f"{title}_{locale}.m4a")
             decrypt_cmd = [resolve_executable("mp4decrypt"), enc_audio_path, dec_audio_path, "--show-progress", "--key", audio['key']]
-            _, stderr, retcode = run_shell_command(decrypt_cmd)
+            _, stderr, retcode = run_shell_command(decrypt_cmd, cancel_event=cancel_event)
             if retcode != 0:
                 print(f"Warning: Audio decryption failed for {locale}: {stderr}. Skipping audio track.")
                 continue

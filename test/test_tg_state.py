@@ -20,6 +20,7 @@ def make_session(step="confirm_download", message=None):
         "data": {},
         "message": message,
         "is_series": False,
+        "nonce": "nonce000001",
     }
 
 
@@ -27,12 +28,14 @@ class StateTestCase(unittest.TestCase):
     def setUp(self):
         config.user_states.clear()
         config.active_downloads.clear()
-        tg.cancelled_users.clear()
+        tg.cancelled_jobs.clear()
+        tg.cancel_events.clear()
 
     def tearDown(self):
         config.user_states.clear()
         config.active_downloads.clear()
-        tg.cancelled_users.clear()
+        tg.cancelled_jobs.clear()
+        tg.cancel_events.clear()
 
 
 class TestStartTransitionIsAtomic(StateTestCase):
@@ -76,10 +79,12 @@ class TestStartTransitionIsAtomic(StateTestCase):
 
 
 class TestCancellation(StateTestCase):
-    def test_cancel_flags_the_user(self):
+    def test_cancel_flags_the_running_job(self):
         config.user_states[7] = make_session(step="downloading")
+        self.assertTrue(tg.begin_active_download(7, "downloading"))
+        job_id = config.active_downloads[7]["job_id"]
         tg.request_cancel(7)
-        self.assertTrue(tg.is_cancelled(7))
+        self.assertTrue(tg.is_job_cancelled(job_id))
 
     def test_cancel_drops_session_and_guard(self):
         config.user_states[7] = make_session(step="downloading")
@@ -91,15 +96,57 @@ class TestCancellation(StateTestCase):
     def test_cancel_with_no_session_returns_none(self):
         self.assertIsNone(tg.request_cancel(7))
 
-    def test_new_download_clears_a_stale_cancel_flag(self):
+    def test_new_download_is_not_cancelled_by_an_earlier_one(self):
         """After cancelling, the user's next run must not self-cancel."""
-        config.user_states[7] = make_session()
+        config.user_states[7] = make_session(step="downloading")
+        self.assertTrue(tg.begin_active_download(7, "downloading"))
+        first_job = config.active_downloads[7]["job_id"]
         tg.request_cancel(7)
-        self.assertTrue(tg.is_cancelled(7))
 
         config.user_states[7] = make_session()          # user starts over
         self.assertTrue(tg.begin_active_download(7, "confirm_download"))
-        self.assertFalse(tg.is_cancelled(7))
+        second_job = config.active_downloads[7]["job_id"]
+
+        self.assertNotEqual(first_job, second_job)
+        self.assertFalse(tg.is_job_cancelled(second_job))
+
+    def test_cancelling_a_new_job_leaves_the_old_one_cancelled(self):
+        """B05: a new job must not clear an older job's cancellation.
+
+        Under the old per-user flag, starting run #2 discarded the user id and
+        the straggling worker for run #1 then read "not cancelled" and kept
+        downloading.
+        """
+        config.user_states[7] = make_session(step="downloading")
+        self.assertTrue(tg.begin_active_download(7, "downloading"))
+        first_job = config.active_downloads[7]["job_id"]
+        tg.request_cancel(7)
+        self.assertTrue(tg.is_job_cancelled(first_job))
+
+        # user immediately starts run #2
+        config.user_states[7] = make_session()
+        self.assertTrue(tg.begin_active_download(7, "confirm_download"))
+
+        # the cancelled run is still recognised as cancelled
+        self.assertTrue(tg.is_job_cancelled(first_job))
+
+    def test_cancel_sets_the_media_event(self):
+        """B06: the flag must reach curl/ffmpeg, not just Python loops."""
+        config.user_states[7] = make_session(step="downloading")
+        self.assertTrue(tg.begin_active_download(7, "downloading"))
+        state = config.active_downloads[7]
+        self.assertFalse(state["cancel_event"].is_set())
+        tg.request_cancel(7)
+        self.assertTrue(state["cancel_event"].is_set())
+
+    def test_finishing_a_job_clears_its_cancel_flag(self):
+        config.user_states[7] = make_session(step="downloading")
+        self.assertTrue(tg.begin_active_download(7, "downloading"))
+        state = config.active_downloads[7]
+        job_id = state["job_id"]
+        tg.finish_active_download(7, state)
+        self.assertFalse(tg.is_job_cancelled(job_id))
+        self.assertNotIn(job_id, tg.cancel_events)
 
 
 class TestCleanupOnlyReleasesOwnedResources(StateTestCase):

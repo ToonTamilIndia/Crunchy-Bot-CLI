@@ -91,6 +91,52 @@ def split_command(command):
         ctypes.windll.kernel32.LocalFree(argv)
 
 
-def run_command(command, **kwargs):
+class OperationCancelled(RuntimeError):
+    """Raised when a caller-supplied cancel event is set mid-operation."""
+
+
+def cancelled(cancel_event):
+    """True when the caller asked to stop. None means "never cancel"."""
+    return bool(cancel_event is not None and cancel_event.is_set())
+
+
+def run_cancellable(command, cancel_event=None, **kwargs):
+    """subprocess.run, but kill the child when cancel_event is set.
+
+    A cancel that only reaches Python between stages leaves curl/ffmpeg running
+    to completion, so the user watches a dead download finish. This polls the
+    child and terminates it as soon as the flag is seen.
+    """
+    command = [str(part) for part in command]
+    if cancelled(cancel_event):
+        raise OperationCancelled("cancelled before starting " + str(command[:1]))
+    popen = subprocess.Popen(command, **kwargs)
+    try:
+        while True:
+            try:
+                popen.wait(timeout=0.25)
+                break
+            except subprocess.TimeoutExpired:
+                if cancelled(cancel_event):
+                    popen.terminate()
+                    try:
+                        popen.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        popen.kill()
+                    raise OperationCancelled("cancelled: " + str(command[:1]))
+    finally:
+        if popen.poll() is None:
+            try:
+                popen.kill()
+            except Exception:
+                pass
+    out, err = popen.communicate()
+    return subprocess.CompletedProcess(command, popen.returncode, out, err)
+
+
+def run_command(command, cancel_event=None, **kwargs):
     """Run a command without invoking a platform-specific shell."""
-    return subprocess.run([str(part) for part in command], check=False, **kwargs)
+    command = [str(part) for part in command]
+    if cancel_event is None:
+        return subprocess.run(command, check=False, **kwargs)
+    return run_cancellable(command, cancel_event=cancel_event, **kwargs)
