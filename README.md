@@ -201,10 +201,29 @@ sudo_users    = []
 premium_users = []
 
 # Download Defaults
-DEFAULT_QUALITY  = "720p"
-ENABLE_WATERMARK = False
-DEBUG            = False
+# Resolution is chosen interactively when you run; the limits below cap what a
+# non-privileged user may request.
+REGULAR_USER_VIDEO_LIMIT_P = 480
+REGULAR_USER_AUDIO_LIMIT   = 2
+
+# Watermark
+use_watermark = True
+fontfile      = "font.ttf"
+fontcolor     = "white"
+Watermark_Name = "YourName"
+
+# Output
+output_format = "mkv"   # mkv or mp4
+download_threads = 8    # segment download concurrency
+
+# Debug
+debug = False           # or start with --debug / --debug=LEVEL
+level = "DEBUG"
 ```
+
+The settings above are the ones this project actually reads. `DEFAULT_QUALITY`,
+`ENABLE_WATERMARK` and an uppercase `DEBUG` flag were previously listed here
+but were never read by the code, so changing them had no effect.
 
 ### Configuration Reference
 

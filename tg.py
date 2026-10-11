@@ -90,10 +90,16 @@ class tgUploader:
         self.msg = msg
 
     def upload_file(self, file_path):
+        """Upload and report the outcome.
+
+        Returns (ok, detail). A failed upload previously returned None and the
+        caller announced "Upload complete" regardless.
+        """
         thumb = None
         try:
             file_name = os.path.basename(file_path)
             duration = get_duration(file_path)
+            width, height = get_dimensions(file_path)
             thumb = get_thumbnail(file_path, "", duration / 2)
             caption = '''<code>{}</code>'''.format(file_name)
             progress_args_text = "<code>[+]</code> <b>{}</b>\n<code>{}</code>".format("Uploading", file_name)
@@ -108,19 +114,40 @@ class tgUploader:
                     time.time()
                 ),
                 "duration": duration,
-                "width": 1280,
-                "height": 720
+                "width": width,
+                "height": height,
             }
             if thumb:
                 send_kwargs["thumb"] = thumb
             self.app.send_video(**send_kwargs)
+            return True, "Upload complete"
         except Exception as e:
             print(e)
-            self.msg.edit(f"`{e}`")
+            with suppress(Exception):
+                self.msg.edit(f"`{e}`")
+            return False, str(e)
         finally:
             if thumb:
                 with suppress(Exception):
                     os.remove(thumb)
+
+def get_dimensions(filepath):
+    """Real width/height of the produced file.
+
+    Telegram was told 1280x720 unconditionally, which misrepresents every
+    other rendition. Falls back to 0 (omit) when it cannot be determined.
+    """
+    try:
+        parser = createParser(filepath)
+        if not parser:
+            return 0, 0
+        metadata = extractMetadata(parser)
+        width = int(metadata.get("width") or 0) if metadata else 0
+        height = int(metadata.get("height") or 0) if metadata else 0
+        return width, height
+    except Exception:
+        return 0, 0
+
 
 def get_duration(filepath):
     try:
@@ -1400,7 +1427,9 @@ def process_download(client, user_id):
                     final_output_files.append(final_ep_output)
                     edit_message(status_msg, f"{ep_num_str}📤 **Uploading...**")
                     uploader = tgUploader(app, status_msg)
-                    uploader.upload_file(final_ep_output)
+                    ok, detail = uploader.upload_file(final_ep_output)
+                    if not ok:
+                        print(f"{ep_num_str}: upload failed: {detail}")
                 else:
                     edit_message(status_msg, f"{ep_num_str}: Failed to process episode.")
 
@@ -1507,8 +1536,11 @@ def process_download(client, user_id):
             if final_output_path:
                 edit_message(status_msg, "📤 **Uploading...**")
                 uploader = tgUploader(app, status_msg)
-                uploader.upload_file(final_output_path)
-                edit_message(status_msg, f"Upload complete: `{os.path.basename(final_output_path)}`")
+                ok, detail = uploader.upload_file(final_output_path)
+                if ok:
+                    edit_message(status_msg, f"Upload complete: `{os.path.basename(final_output_path)}`")
+                else:
+                    edit_message(status_msg, f"Upload failed: `{detail}`")
             else:
                 edit_message(status_msg, "Download failed during processing.")
 

@@ -656,18 +656,39 @@ def normalize_kid(value):
     return re.sub(r"[^0-9a-f]", "", str(value).lower())
 
 
-def resolve_batch_subtitles(selected_languages, track_info_list, locale_map=None):
+def track_key(track):
+    """Stable identity for a subtitle/caption track across episodes.
+
+    Language alone is ambiguous: an episode can offer both an en-US caption and
+    an en-US subtitle, and matching on language alone replayed whichever came
+    first, so a request for the subtitle silently muxed the caption.
+    """
+    if isinstance(track, dict):
+        return (track.get("type"), track.get("language"))
+    if isinstance(track, (tuple, list)):
+        # Already a key: keep it idempotent so callers can pass either form.
+        return tuple(track)[:2]
+    return (None, track)
+
+
+def resolve_batch_subtitles(selected_tracks, track_info_list, locale_map=None):
     """Re-resolve a one-time subtitle choice against one episode's track list.
 
     Batch mode prompts once and replays the answer for every episode, but track
-    lists differ between episodes. Resolving by language instead of by the stored
-    index avoids both IndexError and the silent failure where a differently
-    ordered list muxes the wrong language.
+    lists differ between episodes. Resolving by (type, language) instead of by
+    the stored index avoids both IndexError and the silent failure where a
+    differently ordered list muxes the wrong track.
     """
     locale_map = locale_map or {}
     selected = []
-    for wanted in selected_languages or []:
-        entry = next((t for t in track_info_list if t.get("language") == wanted), None)
+    for wanted in selected_tracks or []:
+        wanted_key = track_key(wanted)
+        entry = next((t for t in track_info_list if track_key(t) == wanted_key), None)
+        if entry is None and wanted_key[1]:
+            # Episode offers only one kind of track for that language; fall back
+            # so a caption-only episode still gets the requested language.
+            entry = next((t for t in track_info_list
+                          if t.get("language") == wanted_key[1]), None)
         if entry is None:
             continue
         selected.append({

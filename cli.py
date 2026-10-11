@@ -14,7 +14,7 @@ from crunchyroll import (
     get_episode_display_number, get_episode_season_title,
     get_episode_title, parse_episode_selection, set_cr_debug, resolve_debug_settings,
     get_download_path, get_encrypted_media_path, get_temp_path,
-    resolve_encoding_config, EncodingConfig, config_value,
+    resolve_encoding_config, EncodingConfig, config_value, track_key,
     extract_content_key, LicenseError,
     resolve_batch_subtitles, resolve_batch_audios, resolve_video_quality,
     dedup_preserving_order,
@@ -92,6 +92,18 @@ def download_file(url, destination):
     response.raise_for_status()
     with open(destination, "wb") as output:
         output.write(response.content)
+
+
+def subtitle_stem(title, subtitle, extension):
+    """Filename for a subtitle/caption track.
+
+    Naming on title+language alone made an en-US caption and an en-US subtitle
+    resolve to the same scratch file, so the second overwrote the first. The
+    track kind is part of the name now.
+    """
+    kind = subtitle.get("type") if isinstance(subtitle, dict) else "subtitle"
+    language = subtitle.get("language", "und") if isinstance(subtitle, dict) else "und"
+    return f"{title}_{kind}_{language}.{extension}"
 
 
 def decrypt_file(source, destination, key, cancel_event=None):
@@ -367,12 +379,12 @@ if "watch" in video_url:
     if selected_subtitles:
         print("Downloading subtitle file...")
         for subtitle in selected_subtitles:
-            subtitle_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}", create_parent=True)
+            subtitle_path = get_temp_path(Title, subtitle_stem(Title, subtitle, subtitle['format']), create_parent=True)
             download_file(subtitle['url'], subtitle_path)
         for subtitle in selected_subtitles:
             if subtitle['format'] == 'vtt':
-                source_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
-                converted_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.srt", create_parent=True)
+                source_path = get_temp_path(Title, subtitle_stem(Title, subtitle, subtitle['format']))
+                converted_path = get_temp_path(Title, subtitle_stem(Title, subtitle, 'srt'), create_parent=True)
                 convert_vtt_to_srt_custom(source_path, converted_path)
                 os.remove(source_path)
                 subtitle['format'] = "srt"
@@ -406,7 +418,7 @@ if "watch" in video_url:
 
     if selected_subtitles:
         for subtitle in selected_subtitles:
-            subtitle_file = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
+            subtitle_file = get_temp_path(Title, subtitle_stem(Title, subtitle, subtitle['format']))
             ffmpeg_command += f" -i {quote_argument(subtitle_file)}"
 
 
@@ -510,7 +522,7 @@ else:
         print(f"Invalid episode selection: {error}")
         exit()
     selected_audio_locales = []
-    selected_subtitle_langs = []
+    selected_subtitle_tracks = []
     video_quality = 0
     video_height = None
     subtitle_indices = []
@@ -646,34 +658,40 @@ else:
                         'format': data['format']
                     })      
     
-                if aka == 1:
-                    print("Available subtitle/caption tracks:")
-                    for i, label in enumerate(available_tracks, start=1):
-                        print(f"{i}. {label}")
+            # Prompt after collecting BOTH kinds. It used to sit inside the
+            # subtitles branch, so an episode offering captions but no
+            # subtitles never asked and silently downloaded nothing.
+            if aka == 1 and available_tracks:
+                print("Available subtitle/caption tracks:")
+                for i, label in enumerate(available_tracks, start=1):
+                    print(f"{i}. {label}")
 
-                    subtitle_list_input = input("Enter the desired track number(s) (comma-separated for multiple): ")
+                subtitle_list_input = input("Enter the desired track number(s) (comma-separated for multiple): ")
 
-                    try:
-                        subtitle_indices = [int(c.strip()) - 1 for c in subtitle_list_input.split(',')]
-                        if any(i < 0 or i >= len(track_info_list) for i in subtitle_indices):
-                            print("Invalid choice(s). Please try again.")
-                            exit()
-                    except ValueError:
-                        print("Invalid input. Please enter numbers only.")
+                try:
+                    subtitle_indices = [int(c.strip()) - 1 for c in subtitle_list_input.split(',')]
+                    if any(i < 0 or i >= len(track_info_list) for i in subtitle_indices):
+                        print("Invalid choice(s). Please try again.")
                         exit()
+                except ValueError:
+                    print("Invalid input. Please enter numbers only.")
+                    exit()
 
-            # Track lists differ between episodes, so remember the chosen
-            # languages rather than raw indices and re-resolve them per episode.
-            # Replaying episode 1's indices can IndexError or, worse, silently
-            # mux a different language when two episodes order tracks differently.
-            if aka == 1 and subtitle_indices:
-                selected_subtitle_langs = dedup_preserving_order(
-                    [track_info_list[i]['language'] for i in subtitle_indices]
+                # Track lists differ between episodes, so remember the chosen
+                # identity rather than raw indices and re-resolve per episode.
+                # Matching on (type, language) keeps an en-US subtitle from
+                # replaying as an en-US caption.
+                selected_subtitle_tracks = dedup_preserving_order(
+                    [track_key(track_info_list[i]) for i in subtitle_indices]
                 )
+                # Preferences are captured now, not at end of episode: an early
+                # skip used to leave aka at 1 and re-prompt for the next episode.
+                aka = 0
 
-            selected_subtitles = resolve_batch_subtitles(
-                selected_subtitle_langs, track_info_list, config_value("locale_map")
-            ) or False
+            if available_tracks:
+                selected_subtitles = resolve_batch_subtitles(
+                    selected_subtitle_tracks, track_info_list, config_value("locale_map")
+                ) or False
     
     
 
@@ -706,12 +724,12 @@ else:
         if selected_subtitles:
             print("Downloading subtitle file...")
             for subtitle in selected_subtitles:
-                subtitle_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}", create_parent=True)
+                subtitle_path = get_temp_path(Title, subtitle_stem(Title, subtitle, subtitle['format']), create_parent=True)
                 download_file(subtitle['url'], subtitle_path)
             for subtitle in selected_subtitles:
                 if subtitle['format'] == 'vtt':
-                    source_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
-                    converted_path = get_temp_path(Title, f"{Title}_{subtitle['language']}.srt", create_parent=True)
+                    source_path = get_temp_path(Title, subtitle_stem(Title, subtitle, subtitle['format']))
+                    converted_path = get_temp_path(Title, subtitle_stem(Title, subtitle, 'srt'), create_parent=True)
                     convert_vtt_to_srt_custom(source_path, converted_path)
                     os.remove(source_path)
                     subtitle['format'] = "srt"    
@@ -747,7 +765,7 @@ else:
 
         if selected_subtitles:
             for subtitle in selected_subtitles:
-                subtitle_file = get_temp_path(Title, f"{Title}_{subtitle['language']}.{subtitle['format']}")
+                subtitle_file = get_temp_path(Title, subtitle_stem(Title, subtitle, subtitle['format']))
                 ffmpeg_command += f" -i {quote_argument(subtitle_file)}"
     
     
