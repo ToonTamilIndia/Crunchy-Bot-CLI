@@ -671,6 +671,33 @@ def track_key(track):
     return (None, track)
 
 
+def resolve_keep_ass_subtitles(choice=None):
+    """Decide whether downloaded Crunchyroll .ass tracks are embedded unchanged.
+
+    A CLI choice (``--keep-ass`` / ``--to-srt``) wins; otherwise the live
+    ``keep_ass_subtitles`` setting applies, defaulting to True so the styled ASS
+    track is what lands in the MKV.
+    """
+    if choice is not None:
+        return bool(choice)
+    return _as_bool(config_value("keep_ass_subtitles"), True)
+
+
+def subtitle_needs_srt(subtitle_format, keep_ass=True, output_format="mkv"):
+    """Whether a downloaded subtitle track must be converted to SRT.
+
+    VTT is always converted. ASS is kept as-is when allowed, and only converted
+    when the user asked for SRT or the container cannot hold ASS (mp4 supports
+    only mov_text, so a copied ASS track makes ffmpeg fail).
+    """
+    fmt = str(subtitle_format or "").lower()
+    if fmt == "vtt":
+        return True
+    if fmt == "ass":
+        return (not keep_ass) or str(output_format or "").lower() == "mp4"
+    return False
+
+
 def resolve_batch_subtitles(selected_tracks, track_info_list, locale_map=None):
     """Re-resolve a one-time subtitle choice against one episode's track list.
 
@@ -1055,59 +1082,155 @@ def download_segment(segment_links, name, format, max_threads=20, headers=None,
     return output_path
 
 def convert_vtt_to_srt_custom(vtt_path, srt_path):
-    with open(vtt_path, "r", encoding="utf-8") as vtt_file:
-        lines = vtt_file.readlines()
+    """Convert a WebVTT track to SRT.
+
+    Crunchyroll emits spec-shaped WebVTT: an optional cue identifier on its own
+    line, then the timing line, then the cue text, with a blank line between
+    cues. The previous parser ignored blank lines and only reacted to timing
+    lines, so the *next* cue's identifier (``38``, ``39`` ...) was appended to
+    the end of the previous cue's text. Walk cue by cue and drop identifiers.
+    """
+    with open(vtt_path, "r", encoding="utf-8-sig") as vtt_file:
+        lines = vtt_file.read().splitlines()
+
+    timestamp_re = re.compile(
+        r"(\d{2}:\d{2}:\d{2}\.\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}\.\d{3})"
+    )
+    tag_re = re.compile(r"</?[^>]+>")
+
+    cues = []  # (timestamp, [text lines])
+
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+
+        if not line or line.startswith("WEBVTT") or line.startswith("X-TIMESTAMP"):
+            index += 1
+            continue
+
+        if line.startswith("STYLE") or line.startswith("NOTE"):
+            # Header blocks run until the next blank line.
+            index += 1
+            while index < len(lines) and lines[index].strip():
+                index += 1
+            continue
+
+        match = timestamp_re.match(line)
+        if not match:
+            # A cue identifier (or other cue-adjacent metadata) sitting between
+            # the previous cue and this one's timing line; not displayable text.
+            index += 1
+            continue
+
+        timestamp = f"{match.group(1)} --> {match.group(2)}".replace(".", ",")
+        index += 1
+        text_lines = []
+        while index < len(lines):
+            text_line = lines[index].strip()
+            if not text_line or timestamp_re.match(text_line):
+                break
+            text_lines.append(tag_re.sub("", text_line))
+            index += 1
+        cues.append((timestamp, text_lines))
 
     srt_lines = []
     counter = 1
-    buffer = []
-    timestamp_line = None
-    inside_style_block = False
-
-    for line in lines:
-        line = line.strip()
-
-        if line.startswith("STYLE"):
-            inside_style_block = True
+    for timestamp, text_lines in cues:
+        if not text_lines:
             continue
-        if inside_style_block:
-            if line == "}":
-                inside_style_block = False
-            continue
-
-        if line == "WEBVTT" or re.match(r"^c\d+$", line):
-            continue
-
-        if re.match(r"\d{2}:\d{2}:\d{2}\.\d{3} -->", line):
-            if timestamp_line and buffer:
-                srt_lines.append(f"{counter}")
-                srt_lines.append(timestamp_line)
-                srt_lines.extend(buffer)
-                srt_lines.append("")
-                counter += 1
-                buffer = []
-
-            
-            timestamp_line = line.replace(".", ",")
-            timestamp_line = re.sub(r" line:.*", "", timestamp_line)
-
-        elif line == "":
-            continue
-        else:
-            
-            clean_line = re.sub(r"</?[^>]+>", "", line)
-            buffer.append(clean_line)
-
-    if timestamp_line and buffer:
         srt_lines.append(f"{counter}")
-        srt_lines.append(timestamp_line)
-        srt_lines.extend(buffer)
+        srt_lines.append(timestamp)
+        srt_lines.extend(text_lines)
         srt_lines.append("")
+        counter += 1
 
     with open(srt_path, "w", encoding="utf-8") as srt_file:
         srt_file.write("\n".join(srt_lines))
 
     print(f"✅ Converted: {vtt_path} -> {srt_path}")
+
+
+def _ass_timestamp_to_srt(value):
+    """Convert an ASS ``H:MM:SS.cc`` timestamp to SRT ``HH:MM:SS,mmm``."""
+    match = re.match(r"\s*(\d+):(\d{2}):(\d{2})[.:](\d{1,3})", value or "")
+    if not match:
+        return None
+    hours, minutes, seconds, fraction = match.groups()
+    milliseconds = int(fraction.ljust(3, "0")[:3])
+    return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d},{milliseconds:03d}"
+
+
+def convert_ass_to_srt_custom(ass_path, srt_path):
+    """Convert an ASS/SSA track to SRT.
+
+    Crunchyroll serves its translator subtitles as ``.ass``. Kept as-is they mux
+    into MKV with full styling (fonts, positioning, signs); this converter is the
+    fallback for mp4 output and for ``keep_ass_subtitles = False``, which require
+    a plain SRT. Tags such as ``{\\pos(...)}`` and ``\\N`` breaks are stripped.
+    """
+    with open(ass_path, "r", encoding="utf-8-sig") as ass_file:
+        lines = ass_file.read().splitlines()
+
+    in_events = False
+    fields = []
+    cues = []
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line.startswith("[") and line.endswith("]"):
+            in_events = line.lower() == "[events]"
+            continue
+        if not in_events:
+            continue
+
+        if line.lower().startswith("format:"):
+            fields = [name.strip().lower() for name in line.split(":", 1)[1].split(",")]
+            continue
+        if not line.lower().startswith("dialogue:"):
+            continue
+
+        # The Text field is last and may itself contain commas, so only split it
+        # into the known number of columns the Format line declared.
+        columns = max(len(fields) - 1, 0) if fields else 9
+        parts = line.split(":", 1)[1].lstrip().split(",", columns)
+
+        start_index = fields.index("start") if "start" in fields else 1
+        end_index = fields.index("end") if "end" in fields else 2
+        text_index = fields.index("text") if "text" in fields else len(parts) - 1
+        if max(start_index, end_index, text_index) >= len(parts):
+            continue
+
+        start = _ass_timestamp_to_srt(parts[start_index])
+        end = _ass_timestamp_to_srt(parts[end_index])
+        if not start or not end:
+            continue
+
+        text = re.sub(r"\{[^}]*\}", "", parts[text_index])  # {\pos}, {\i1}, ...
+        text = text.strip()
+        # Crunchyroll wraps the whole Text column in a pair of double quotes;
+        # the ASS spec does not, so drop them (but only a clean wrapping pair).
+        if text.startswith('"') and text.endswith('"') and text.count('"') == 2:
+            text = text[1:-1]
+        text = re.sub(r"\\[Nn]", "\n", text)                # hard line breaks
+        text = text.replace("\\h", " ")                     # non-breaking space
+        text_lines = [piece.strip() for piece in text.split("\n") if piece.strip()]
+        if text_lines:
+            cues.append((start, end, text_lines))
+
+    srt_lines = []
+    for counter, (start, end, text_lines) in enumerate(cues, start=1):
+        srt_lines.append(f"{counter}")
+        srt_lines.append(f"{start} --> {end}")
+        srt_lines.extend(text_lines)
+        srt_lines.append("")
+
+    with open(srt_path, "w", encoding="utf-8") as srt_file:
+        srt_file.write("\n".join(srt_lines))
+
+    print(f"✅ Converted ASS: {ass_path} -> {srt_path}")
 
 def parse_mpd_content(mpd_content):
     if isinstance(mpd_content, str):

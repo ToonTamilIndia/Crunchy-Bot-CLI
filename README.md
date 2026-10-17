@@ -225,6 +225,21 @@ The settings above are the ones this project actually reads. `DEFAULT_QUALITY`,
 `ENABLE_WATERMARK` and an uppercase `DEBUG` flag were previously listed here
 but were never read by the code, so changing them had no effect.
 
+**Credentials from the environment.** To keep your Crunchyroll login out of this
+git-tracked file, export it before launching instead of editing `Email` /
+`Password`:
+
+```bash
+export CR_EMAIL="you@example.com"
+export CR_PASSWORD="your-password"
+# optional: a cached SSO refresh token
+export CR_ETP_RT_TOKEN="..."
+```
+
+When `Email` / `Password` (or `etp_rt_token`) come from the environment this way
+they are read at startup; replacing the line in `config.py` with a literal value
+still works and takes precedence over the environment.
+
 ### Configuration Reference
 
 | Option | Description |
@@ -239,6 +254,7 @@ but were never read by the code, so changing them had no effect.
 | `preset` | Encoder preset (default `"medium"`, balances speed and file size) |
 | `pix_fmt` | Pixel format (default `"yuv420p10le"` 10-bit, prevents anime color banding) |
 | `audio_codec` | Audio codec (`"copy"` preserves 100% original audio quality, or `"aac"`) |
+| `keep_ass_subtitles` | Embed Crunchyroll's styled `.ass` subtitle in the MKV unchanged (default `True`); `False` converts it to SRT. mp4 output always converts. Override per run with `--keep-ass` / `--to-srt` |
 | `use_watermark` | Enable or disable watermarking on output files |
 | `debug` | Enable verbose debug logging |
 
@@ -260,6 +276,8 @@ python3 cli.py
 - `--lossless` / `--losslessy` : Direct stream copy (remux) for bit-for-bit source quality with ultra-fast merge.
 - `--mode=<mode>` : Explicit encoding mode (`lossy`, `lossless`, or `custom`).
 - `--debug` : Show safe auth/playback endpoint status details.
+- `--keep-ass` : Embed Crunchyroll's styled `.ass` subtitle track in the MKV unchanged (default).
+- `--to-srt` : Convert `.ass` subtitles to SRT instead of embedding them.
 
 ### Download Workflow
 

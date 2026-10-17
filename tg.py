@@ -19,11 +19,12 @@ from crunchyroll import (
     Crunchyroll, CrunchyrollAuth, CrunchyrollLicense,
     LicenseError, extract_content_key,
     parse_mpd_content, get_segment_link_list, download_segment,
-    get_filter_complex, convert_vtt_to_srt_custom,
+    get_filter_complex, convert_vtt_to_srt_custom, convert_ass_to_srt_custom,
     get_episode_display_number, get_episode_title,
     parse_episode_selection, get_download_path,
     get_encrypted_media_path, get_temp_path,
     resolve_encoding_config, EncodingConfig,
+    resolve_keep_ass_subtitles, subtitle_needs_srt,
 )
 
 from pyrogram import Client, filters, enums
@@ -1614,13 +1615,16 @@ def download_decrypt_merge_single(
 
                 temp_files.append(sub_temp_path)
 
-                if sub_format.lower() == 'vtt':
+                if subtitle_needs_srt(sub_format, resolve_keep_ass_subtitles(), config_value("output_format")):
                     try:
-                        convert_vtt_to_srt_custom(sub_temp_path, sub_final_path)
+                        if sub_format.lower() == 'ass':
+                            convert_ass_to_srt_custom(sub_temp_path, sub_final_path)
+                        else:
+                            convert_vtt_to_srt_custom(sub_temp_path, sub_final_path)
                         subtitle_files.append({'path': sub_final_path, 'lang': sub['language'], 'title_lang': sub_lang, 'type': '.srt'})
                         temp_files.append(sub_final_path)
                     except Exception as conv_e:
-                        print(f"VTT to SRT conversion failed for {sub_lang}: {conv_e}")
+                        print(f"Subtitle to SRT conversion failed for {sub_lang}: {conv_e}")
                 else:
                     subtitle_files.append({'path': sub_temp_path, 'lang': sub['language'], 'title_lang': sub_lang, 'type': sub['type']})
 

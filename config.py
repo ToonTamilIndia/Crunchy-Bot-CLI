@@ -1,11 +1,17 @@
 '''Crunchyroll Account Configurations 
 if you want to use an account, set use_account to True and fill in the email and password.
 if you want to use a guest account, set use_account to False and leave email and password empty.
+
+Credentials can also come from the environment, which keeps them out of this
+git-tracked file: set CR_EMAIL / CR_PASSWORD (and optionally
+CR_ETP_RT_TOKEN) before launching, or type the values in below.
 '''
+import os
+
 use_account = True
-Email = ""  # Your email here
-Password = ""  # Your password here
-etp_rt_token = ""  # Optional cached SSO refresh token
+Email = os.environ.get("CR_EMAIL", "")  # Your email here (or set CR_EMAIL)
+Password = os.environ.get("CR_PASSWORD", "")  # Your password here (or set CR_PASSWORD)
+etp_rt_token = os.environ.get("CR_ETP_RT_TOKEN", "")  # Optional cached SSO refresh token
 allow_guest_fallback = False  # Fallback to guest token when account auth fails
 
 # --- Telegram Settings ---
@@ -72,6 +78,11 @@ encoding_code = "libx265" # Video encoder ("libx265", "libx264", "copy")
 # Audio & Container Format
 audio_codec = "copy"      # "copy" preserves 100% original Crunchyroll audio quality without re-encoding
 output_format = "mkv"     # Output container format: "mkv" (recommended for multi-audio/subtitles) or "mp4"
+
+# Subtitle handling
+keep_ass_subtitles = True # Embed Crunchyroll's styled .ass subtitle track into the MKV unchanged.
+                          # Set False to convert .ass to SRT. (mp4 output always converts, since mp4 can't hold ASS.)
+                          # Override per run with --keep-ass / --to-srt.
 
 # Legacy compatibility
 original_quality = False  # If True, behaves as encoding_mode = "lossless"
